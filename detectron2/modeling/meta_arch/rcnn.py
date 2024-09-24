@@ -81,6 +81,10 @@ class GeneralizedRCNN(nn.Module):
     @classmethod
     def from_config(cls, cfg):
         backbone = build_backbone(cfg)
+        if cfg.MODEL.BACKBONE.FREEZE:
+            for p in backbone.parameters():
+                p.requires_grad = False
+            print("building: froze backbone parameters")
         return {
             "backbone": backbone,
             "proposal_generator": build_proposal_generator(cfg, backbone.output_shape()),

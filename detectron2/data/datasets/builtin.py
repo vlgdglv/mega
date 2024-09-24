@@ -29,6 +29,8 @@ from .coco_panoptic import register_coco_panoptic, register_coco_panoptic_separa
 from .lvis import get_lvis_instances_meta, register_lvis_instances
 from .pascal_voc import register_pascal_voc
 
+from .meta_coco import register_meta_coco
+
 # ==== Predefined datasets and splits for COCO ==========
 
 _PREDEFINED_SPLITS_COCO = {}
@@ -183,6 +185,28 @@ def register_all_coco(root):
             os.path.join(root, panoptic_root),
             os.path.join(root, panoptic_json),
             instances_json,
+        )
+
+    # Datasets from DeFRCN
+    METASPLITS = [
+        ("coco14_trainval_all", "coco/trainval2014", "cocosplit/datasplit/trainvalno5k.json"),
+        ("coco14_trainval_base", "coco/trainval2014", "cocosplit/datasplit/trainvalno5k.json"),
+        ("coco14_test_all", "coco/val2014", "cocosplit/datasplit/5k.json"),
+        ("coco14_test_base", "coco/val2014", "cocosplit/datasplit/5k.json"),
+        ("coco14_test_novel", "coco/val2014", "cocosplit/datasplit/5k.json"),
+    ]
+    for prefix in ["all", "novel"]:
+        for shot in [1, 2, 3, 5, 10, 30]:
+            for seed in range(10):
+                name = "coco14_trainval_{}_{}shot_seed{}".format(prefix, shot, seed)
+                METASPLITS.append((name, "coco/trainval2014", ""))
+
+    for name, imgdir, annofile in METASPLITS:
+        register_meta_coco(
+            name,
+            _get_builtin_metadata("coco_fewshot"),
+            os.path.join(root, imgdir),
+            os.path.join(root, annofile),
         )
 
 # ==== Predefined datasets and splits for LVIS ==========
