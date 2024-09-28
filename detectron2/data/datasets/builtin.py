@@ -191,11 +191,12 @@ def register_all_coco(root):
     METASPLITS = [
         ("coco14_trainval_all", "coco/trainval2014", "cocosplit/datasplit/trainvalno5k.json"),
         ("coco14_trainval_base", "coco/trainval2014", "cocosplit/datasplit/trainvalno5k.json"),
+        ("coco14_trainval_novel", "coco/trainval2014", "cocosplit/datasplit/trainvalno5k.json"),
         ("coco14_test_all", "coco/val2014", "cocosplit/datasplit/5k.json"),
         ("coco14_test_base", "coco/val2014", "cocosplit/datasplit/5k.json"),
         ("coco14_test_novel", "coco/val2014", "cocosplit/datasplit/5k.json"),
     ]
-    for prefix in ["all", "novel"]:
+    for prefix in ["all", "base", "novel"]:
         for shot in [1, 2, 3, 5, 10, 30]:
             for seed in range(10):
                 name = "coco14_trainval_{}_{}shot_seed{}".format(prefix, shot, seed)

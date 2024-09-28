@@ -9,6 +9,7 @@ def parse_args():
     parser.add_argument('--shot', type=int, default=1, help='shot to run experiments over')
     parser.add_argument('--seed', type=int, default=0, help='seed to run experiments over')
     parser.add_argument('--setting', type=str, default='fsod', choices=['fsod', 'gfsod'])
+    parser.add_argument('--suffix', type=str, default='novel', choices=['all', 'base', 'novel'])
     parser.add_argument('--split', type=int, default=1, help='only for voc')
     args = parser.parse_args()
     return args
@@ -29,7 +30,8 @@ def save_config_file(yaml_info, yaml_path):
 
 def main():
     args = parse_args()
-    suffix = 'novel' if args.setting == 'fsod' else 'all'
+    # suffix = 'novel' if args.setting == 'fsod' else 'all'
+    suffix = args.suffix
 
     if args.dataset in ['voc']:
         name_template = '{}_r101_novelx_{}shot_seedx.yaml'
@@ -44,8 +46,8 @@ def main():
                 yaml_info[i] = _str_.format(suffix, args.split)
         yaml_path = yaml_path.replace('novelx', 'novel{}'.format(args.split))
     elif args.dataset in ['coco14']:
-        name_template = '{}_r101_novel_{}shot_seedx.yaml'
-        yaml_path = os.path.join(args.config_root, name_template.format(args.setting, args.shot))
+        name_template = '{}_r101_{}_{}shot_seedx.yaml'
+        yaml_path = os.path.join(args.config_root, name_template.format(args.setting, args.suffix, args.shot))
         yaml_info = load_config_file(yaml_path)
         for i, lineinfo in enumerate(yaml_info):
             if '  TRAIN: ' in lineinfo:

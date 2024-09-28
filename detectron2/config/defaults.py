@@ -228,6 +228,7 @@ _C.MODEL.PROPOSAL_GENERATOR.NAME = "RPN"
 # Proposal height and width both need to be greater than MIN_SIZE
 # (a the scale used during training or inference)
 _C.MODEL.PROPOSAL_GENERATOR.MIN_SIZE = 0
+_C.MODEL.PROPOSAL_GENERATOR.FREEZE = False
 
 
 # ---------------------------------------------------------------------------- #
@@ -333,6 +334,7 @@ _C.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE = 512
 # Target fraction of RoI minibatch that is labeled foreground (i.e. class > 0)
 _C.MODEL.ROI_HEADS.POSITIVE_FRACTION = 0.25
 
+_C.MODEL.ROI_HEADS.FREEZE = False
 # Only used on test mode
 
 # Minimum score threshold (assuming scores in a [0, 1] range); a value chosen to
