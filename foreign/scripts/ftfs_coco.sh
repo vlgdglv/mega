@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 export NCCL_DEBUG=WARN
 
-EXPNAME=$1
+EXPNAME=$2
 SAVEDIR=checkpoints/coco/${EXPNAME}
 IMAGENET_PRETRAIN=weights/ImageNetPretrained/MSRA/R-101.pkl                            # <-- change it to you path
 IMAGENET_PRETRAIN_TORCH=weights/ImageNetPretrained/torchvision/resnet101-5d3b4d8f.pth  # <-- change it to you path
@@ -45,7 +45,7 @@ fs_base(){
 fs_novel(){
     for shot in 1 #1 3 5 10 30
     do
-        for seed in 0 5 9
+        for seed in 0 #5 9
         do
             python3 foreign/create_config.py --dataset coco14 --config_root configs/coco \
                     --shot ${shot} --seed ${seed} --suffix novel
@@ -98,8 +98,21 @@ fs_novel_eval(){
     done
 }
 
-# surgery
-fs_base
-# fs_base_eval
-fs_novel
-# fs_novel_eval
+case $1 in
+    "fs_base")
+        fs_base
+        ;;
+    "fs_novel")
+        fs_novel
+        ;;
+    "fs_base_eval")
+        fs_base_eval
+        ;;
+    "fs_novel_eval")
+        fs_novel_eval
+        ;;
+    *)
+        echo "Usage: $0 {fs_base|fs_novel}"
+        exit 1
+        ;;
+esac

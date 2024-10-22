@@ -309,6 +309,10 @@ _C.MODEL.RPN.POST_NMS_TOPK_TEST = 1000
 _C.MODEL.RPN.NMS_THRESH = 0.7
 # Set this to -1 to use the same number of output channels as input channels.
 _C.MODEL.RPN.CONV_DIMS = [-1]
+# learner
+_C.MODEL.RPN.ENGAGE_LEARNER = False
+_C.MODEL.RPN.LEARNER_DIM = 512
+_C.MODEL.RPN.LEARNER_FREEZE = False
 
 # ---------------------------------------------------------------------------- #
 # ROI HEADS options

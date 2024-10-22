@@ -74,7 +74,8 @@ class StandardRPNHead(nn.Module):
 
     @configurable
     def __init__(
-        self, *, in_channels: int, num_anchors: int, box_dim: int = 4, conv_dims: List[int] = (-1,)
+        self, *, in_channels: int, num_anchors: int, box_dim: int = 4, conv_dims: List[int] = (-1,), 
+        learner: Optional[nn.Module] = None
     ):
         """
         NOTE: this interface is experimental.
@@ -122,6 +123,8 @@ class StandardRPNHead(nn.Module):
             if isinstance(layer, nn.Conv2d):
                 nn.init.normal_(layer.weight, std=0.01)
                 nn.init.constant_(layer.bias, 0)
+        
+        self.learner = learner
 
     def _get_rpn_conv(self, in_channels, out_channels):
         return Conv2d(
@@ -148,11 +151,16 @@ class StandardRPNHead(nn.Module):
         assert (
             len(set(num_anchors)) == 1
         ), "Each level must have the same number of anchors per spatial position"
+        if cfg.MODEL.RPN.ENGAGE_LEARNER:
+            learner = RPNLearner(feature_dim=in_channels, latent_dim=cfg.MODEL.RPN.LEARNER_DIM, freeze=cfg.MODEL.RPN.LEARNER_FREEZE)
+        else:
+            learner = None
         return {
             "in_channels": in_channels,
             "num_anchors": num_anchors[0],
             "box_dim": box_dim,
             "conv_dims": cfg.MODEL.RPN.CONV_DIMS,
+            "learner": learner,
         }
 
     def forward(self, features: List[torch.Tensor]):
@@ -170,11 +178,20 @@ class StandardRPNHead(nn.Module):
         """
         pred_objectness_logits = []
         pred_anchor_deltas = []
+        lattent_outputs = [] 
+
         for x in features:
             t = self.conv(x)
             pred_objectness_logits.append(self.objectness_logits(t)) # Conv2d(1024, 15, kernel_size=(1, 1), stride=(1, 1))
             pred_anchor_deltas.append(self.anchor_deltas(t)) # Conv2d(1024, 60, kernel_size=(1, 1), stride=(1, 1))
-        return pred_objectness_logits, pred_anchor_deltas
+            if self.learner is not None:
+                latent_feature = self.learner(t)  # (N, latent_dim)
+                lattent_outputs.append(latent_feature)
+
+        if self.learner is not None:
+            return pred_objectness_logits, pred_anchor_deltas, lattent_outputs
+        else:
+            return pred_objectness_logits, pred_anchor_deltas        
 
 
 @PROPOSAL_GENERATOR_REGISTRY.register()
@@ -531,3 +548,43 @@ class RPN(nn.Module):
             # Append feature map proposals with shape (N, Hi*Wi*A, B)
             proposals.append(proposals_i.view(N, -1, B))
         return proposals
+
+
+
+class RPNLearner(nn.Module):
+    """
+    Learner model for RPN intermediate variables.
+    """
+
+    def __init__(self, feature_dim, latent_dim=512, freeze=False):
+        """
+        Args:
+            feature_dim (int): The dimension of the intermediate feature (t).
+            latent_dim (int): The dimension of the latent space.
+        """
+        super(RPNLearner, self).__init__()
+        self.attention = nn.Sequential(
+            nn.Conv2d(feature_dim, latent_dim, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(latent_dim, latent_dim, kernel_size=1),
+            nn.ReLU(inplace=True)
+        )
+        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(latent_dim, latent_dim)
+
+        if freeze:
+            for param in self.parameters():
+                param.requires_grad = False
+
+    def forward(self, t):
+        """
+        Args:
+            t (Tensor): The intermediate feature from RPN Head, shape (N, C, H, W).
+        Returns:
+            latent_feature (Tensor): The latent feature representation, shape (N, latent_dim).
+        """
+        attention_feature = self.attention(t)  # (N, latent_dim, H, W)
+        pooled_feature = self.avg_pool(attention_feature)  # (N, latent_dim, 1, 1)
+        pooled_feature = pooled_feature.view(pooled_feature.size(0), -1)  # (N, latent_dim)
+        latent_feature = self.fc(pooled_feature)  # (N, latent_dim)
+        return latent_feature

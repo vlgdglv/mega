@@ -301,7 +301,7 @@ class TaskEncoder(nn.Module):
     def forward(self, support_images: torch.Tensor):
         """
         Args:
-            support_images: Tensor of shape (N, C, H, W), N 是支持集的样本数量
+            support_images: Tensor of shape (N, C, H, W)
         Returns:
             task_feature: Tensor of shape (task_feature_dim,)
         """
