@@ -15,3 +15,4 @@ tqdm
 xformers==0.0.16 # xformers==0.0.18 works better, but 0.0.18 depends on torch2. So you need to compile xformers on your own, which is also easy btw
 ftfy==6.1.1
 triton==3.0.0
+plotly
