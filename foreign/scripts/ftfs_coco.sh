@@ -45,7 +45,7 @@ fs_base(){
 fs_novel(){
     for shot in 1 #1 3 5 10 30
     do
-        for seed in 0 #5 9
+        for seed in 0 5 9
         do
             python3 foreign/create_config.py --dataset coco14 --config_root configs/coco \
                     --shot ${shot} --seed ${seed} --suffix novel
@@ -110,6 +110,9 @@ case $1 in
         ;;
     "fs_novel_eval")
         fs_novel_eval
+        ;;
+    "sur")
+        surgery
         ;;
     *)
         echo "Usage: $0 {fs_base|fs_novel}"

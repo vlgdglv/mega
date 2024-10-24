@@ -5,6 +5,7 @@ import numpy as np
 from typing import Dict, List, Optional, Tuple
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from detectron2.config import configurable
 from detectron2.layers import ShapeSpec, nonzero_tuple
@@ -810,6 +811,15 @@ class StandardROIHeads(ROIHeads):
         features = [features[f] for f in self.box_in_features]
         box_features = self.box_pooler(features, [x.proposal_boxes for x in proposals])
         box_features = self.box_head(box_features)
+        
+        box_features_flat = box_features.view(box_features.size(0), -1)
+        if self.learner_roi is not None:
+            feature_repr, fused_repr, _ = self.learner_roi(box_features_flat)
+            # 计算表示对齐损失
+            align_loss_roi = self.learner_roi.compute_alignment_loss(feature_repr, fused_repr)
+        else:
+            align_loss_roi = 0.0
+
         predictions = self.box_predictor(box_features)
         del box_features
 
@@ -826,7 +836,10 @@ class StandardROIHeads(ROIHeads):
             return losses
         else:
             pred_instances, _ = self.box_predictor.inference(predictions, proposals)
-            return pred_instances
+            if self.learner_roi is not None:
+                return pred_instances, align_loss_roi
+            else:
+                return pred_instances
 
     def _forward_mask(self, features: Dict[str, torch.Tensor], instances: List[Instances]):
         """
@@ -888,3 +901,101 @@ class StandardROIHeads(ROIHeads):
         else:
             features = {f: features[f] for f in self.keypoint_in_features}
         return self.keypoint_head(features, instances)
+
+
+class LearnerROI(nn.Module):
+    def __init__(self, in_features, latent_dim):
+        super(LearnerROI, self).__init__()
+        # 特征映射到潜在空间的映射函数
+        self.feature_mapper = nn.Sequential(
+            nn.Linear(in_features, latent_dim),
+            nn.ReLU()
+        )
+        # 知识向量的映射函数
+        self.knowledge_mapper = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
+            nn.ReLU()
+        )
+        # 学到的知识向量
+        self.knowledge_vector = nn.Parameter(torch.zeros(latent_dim), requires_grad=True)
+        # 融合层
+        self.fusion_layer = nn.Sequential(
+            nn.Linear(2 * latent_dim, latent_dim),
+            nn.ReLU()
+        )
+        # 自监督预测层
+        self.prediction_layer = nn.Linear(latent_dim, 1)
+        # 存储前一轮的知识向量
+        self.previous_knowledge_vector = None
+
+
+    def forward(self, x):
+        # x: (N, in_features)
+        # 1. 获取当前特征表示
+        feature_representation = self.feature_mapper(x)  # (N, latent_dim)
+        # 2. 获取知识表示
+        knowledge_representation = self.knowledge_mapper(self.knowledge_vector)  # (latent_dim)
+        knowledge_representation_expanded = knowledge_representation.unsqueeze(0).expand(x.size(0), -1)  # (N, latent_dim)
+        # 3. 融合特征表示和知识表示
+        combined_representation = torch.cat([feature_representation, knowledge_representation_expanded], dim=1)
+        fused_representation = self.fusion_layer(combined_representation)  # (N, latent_dim)
+        # 4. 自监督预测
+        predicted_value = self.prediction_layer(fused_representation)  # (N, 1)
+        return feature_representation, fused_representation, predicted_value
+
+
+    def _initialize_weights(self):
+        for m in self.feature_mapper:
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+                nn.init.constant_(m.bias, 0)
+        
+        for m in self.knowledge_mapper:
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+                nn.init.constant_(m.bias, 0)
+
+
+        nn.init.zeros_(self.knowledge_vector)
+
+    def compute_losses(self, predicted_value, target_value):
+        losses = {}
+        # 信息熵正则化损失
+        losses['entropy_loss'] = self._entropy_loss()
+        # 时间差分损失
+        losses['temporal_difference_loss'] = self._temporal_difference_loss()
+        # 自监督预测损失
+        losses['self_supervised_prediction_loss'] = self._self_supervised_prediction_loss(predicted_value, target_value)
+        return losses
+
+
+    def _entropy_loss(self):
+        knowledge_probs = torch.softmax(self.knowledge_vector, dim=0)
+        entropy = -torch.sum(knowledge_probs * torch.log(knowledge_probs + 1e-8))
+        return entropy
+
+    def _temporal_difference_loss(self):
+        if self.previous_knowledge_vector is None:
+            return torch.tensor(0.0, device=self.knowledge_vector.device)
+        else:
+            td_loss = torch.norm(self.knowledge_vector - self.previous_knowledge_vector.detach(), p=2) ** 2
+            return td_loss
+
+    def _self_supervised_prediction_loss(self, predicted_value, target_value):
+        ssp_loss = F.mse_loss(predicted_value.squeeze(), target_value)
+        return ssp_loss
+
+    def update_previous_knowledge(self):
+        self.previous_knowledge_vector = self.knowledge_vector.detach().clone()
+
+    def compute_alignment_loss(feature_representation, fused_representation):
+        # 使用 KL 散度损失
+        current_probs = F.softmax(feature_representation, dim=1)
+        learner_probs = F.softmax(fused_representation.detach(), dim=1)
+        kl_loss = F.kl_div(
+            current_probs.log(),
+            learner_probs,
+            reduction='batchmean'
+        )
+        return kl_loss
+    

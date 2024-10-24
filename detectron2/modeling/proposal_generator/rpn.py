@@ -152,7 +152,7 @@ class StandardRPNHead(nn.Module):
             len(set(num_anchors)) == 1
         ), "Each level must have the same number of anchors per spatial position"
         if cfg.MODEL.RPN.ENGAGE_LEARNER:
-            learner = RPNLearner(feature_dim=in_channels, latent_dim=cfg.MODEL.RPN.LEARNER_DIM, freeze=cfg.MODEL.RPN.LEARNER_FREEZE)
+            learner = LearnerRPN(feature_dim=in_channels, latent_dim=cfg.MODEL.RPN.LEARNER_DIM, freeze=cfg.MODEL.RPN.LEARNER_FREEZE)
         else:
             learner = None
         return {
@@ -178,20 +178,23 @@ class StandardRPNHead(nn.Module):
         """
         pred_objectness_logits = []
         pred_anchor_deltas = []
-        lattent_outputs = [] 
+        latent_outputs, align_losses = [], []
 
         for x in features:
             t = self.conv(x)
             pred_objectness_logits.append(self.objectness_logits(t)) # Conv2d(1024, 15, kernel_size=(1, 1), stride=(1, 1))
             pred_anchor_deltas.append(self.anchor_deltas(t)) # Conv2d(1024, 60, kernel_size=(1, 1), stride=(1, 1))
             if self.learner is not None:
-                latent_feature = self.learner(t)  # (N, latent_dim)
-                lattent_outputs.append(latent_feature)
+                feature_repr, fused_repr, _ = self.learner(t)
+                # 计算表示对齐损失
+                align_loss = self.learner.compute_alignment_loss(feature_repr, fused_repr)
+                align_losses.append(align_loss)
 
         if self.learner is not None:
-            return pred_objectness_logits, pred_anchor_deltas, lattent_outputs
+            total_align_loss = sum(align_losses) / len(align_losses)
+            return pred_objectness_logits, pred_anchor_deltas, total_align_loss
         else:
-            return pred_objectness_logits, pred_anchor_deltas        
+            return pred_objectness_logits, pred_anchor_deltas
 
 
 @PROPOSAL_GENERATOR_REGISTRY.register()
@@ -551,40 +554,108 @@ class RPN(nn.Module):
 
 
 
-class RPNLearner(nn.Module):
-    """
-    Learner model for RPN intermediate variables.
-    """
-
-    def __init__(self, feature_dim, latent_dim=512, freeze=False):
-        """
-        Args:
-            feature_dim (int): The dimension of the intermediate feature (t).
-            latent_dim (int): The dimension of the latent space.
-        """
-        super(RPNLearner, self).__init__()
-        self.attention = nn.Sequential(
-            nn.Conv2d(feature_dim, latent_dim, kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(latent_dim, latent_dim, kernel_size=1),
-            nn.ReLU(inplace=True)
+class LearnerRPN(nn.Module):
+    def __init__(self, in_channels, latent_dim=512, freeze=False):
+        super(LearnerRPN, self).__init__()
+        # 特征映射到潜在空间的映射函数
+        self.feature_mapper = nn.Sequential(
+            nn.Conv2d(in_channels, latent_dim, kernel_size=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1)  # 全局平均池化
         )
-        self.avg_pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(latent_dim, latent_dim)
+        # 知识向量的映射函数
+        self.knowledge_mapper = nn.Sequential(
+            nn.Linear(latent_dim, latent_dim),
+            nn.ReLU()
+        )
+        # 学到的知识向量
+        self.knowledge_vector = nn.Parameter(torch.zeros(latent_dim), requires_grad=True)
+        # 融合层（例如，特征拼接加全连接层）
+        self.fusion_layer = nn.Sequential(
+            nn.Linear(2 * latent_dim, latent_dim),
+            nn.ReLU()
+        )
+        # 自监督预测层
+        self.prediction_layer = nn.Linear(latent_dim, 1)
+        # 存储前一轮的知识向量
+        self.previous_knowledge_vector = None
 
         if freeze:
             for param in self.parameters():
                 param.requires_grad = False
 
-    def forward(self, t):
-        """
-        Args:
-            t (Tensor): The intermediate feature from RPN Head, shape (N, C, H, W).
-        Returns:
-            latent_feature (Tensor): The latent feature representation, shape (N, latent_dim).
-        """
-        attention_feature = self.attention(t)  # (N, latent_dim, H, W)
-        pooled_feature = self.avg_pool(attention_feature)  # (N, latent_dim, 1, 1)
-        pooled_feature = pooled_feature.view(pooled_feature.size(0), -1)  # (N, latent_dim)
-        latent_feature = self.fc(pooled_feature)  # (N, latent_dim)
-        return latent_feature
+    def forward(self, x):
+        batch_size = x.size(0)
+        # 1. 获取当前特征表示（通过 feature_mapper）
+        feature_representation = self.feature_mapper(x).view(batch_size, -1)  # (N, latent_dim)
+        # 2. 获取知识表示（通过 knowledge_mapper）
+        knowledge_representation = self.knowledge_mapper(self.knowledge_vector)  # (latent_dim)
+        # 3. 扩展知识表示以匹配批次大小
+        knowledge_representation_expanded = knowledge_representation.unsqueeze(0).expand(batch_size, -1)  # (N, latent_dim)
+        # 4. 融合特征表示和知识表示
+        combined_representation = torch.cat([feature_representation, knowledge_representation_expanded], dim=1)  # (N, 2 * latent_dim)
+        fused_representation = self.fusion_layer(combined_representation)  # (N, latent_dim)
+        # 5. 自监督预测
+        predicted_value = self.prediction_layer(fused_representation)  # (N, 1)
+        return feature_representation, fused_representation, predicted_value
+
+    def _initialize_weights(self):
+        for m in self.feature_mapper:
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+        for m in self.knowledge_mapper:
+            if isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
+                nn.init.constant_(m.bias, 0)
+        
+
+        nn.init.zeros_(self.knowledge_vector)
+
+    def compute_losses(self, predicted_value, target_value):
+        losses = {}
+        losses['entropy_loss'] = self._entropy_loss()
+        losses['temporal_difference_loss'] = self._temporal_difference_loss()
+        losses['self_supervised_prediction_loss'] = self._self_supervised_prediction_loss(predicted_value, target_value)
+        return losses
+
+    def _entropy_loss(self):
+        # 对知识向量进行 Softmax 归一化, 计算信息熵
+        knowledge_probs = torch.softmax(self.knowledge_vector, dim=0)  # (latent_dim,)
+        entropy = -torch.sum(knowledge_probs * torch.log(knowledge_probs + 1e-8))
+        return entropy
+
+    def _temporal_difference_loss(self):
+        if self.previous_knowledge_vector is None:
+            # 初始情况下，时间差分损失为零
+            return torch.tensor(0.0, device=self.knowledge_vector.device)
+        else:
+            # 计算当前和前一轮知识向量的差异
+            td_loss = torch.norm(self.knowledge_vector - self.previous_knowledge_vector.detach(), p=2) ** 2
+            return td_loss
+
+    def _self_supervised_prediction_loss(self, predicted_value, target_value):
+        # 计算 MSE 损失
+        ssp_loss = F.mse_loss(predicted_value.squeeze(), target_value)
+        return ssp_loss
+
+    def update_previous_knowledge(self):
+        self.previous_knowledge_vector = self.knowledge_vector.detach().clone()
+
+    def compute_alignment_loss(feature_representation, fused_representation):
+        # 对表示进行 Softmax 归一化
+        current_probs = F.softmax(feature_representation, dim=1)
+        learner_probs = F.softmax(fused_representation.detach(), dim=1)
+        # 计算 KL 散度损失
+        kl_loss = F.kl_div(
+            current_probs.log(),
+            learner_probs,
+            reduction='batchmean'
+        )
+        return kl_loss
+
+    # def compute_alignment_loss(feature_representation, fused_representation):
+    #     cosine_loss = 1 - F.cosine_similarity(feature_representation, fused_representation.detach(), dim=1).mean()
+    #     return cosine_loss
