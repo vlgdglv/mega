@@ -581,7 +581,7 @@ class LearnerRPN(nn.Module):
             nn.ReLU()
         )
         # 自监督预测层
-        self.prediction_layer = nn.Linear(latent_dim, 1)
+        # self.prediction_layer = nn.Linear(latent_dim, 1)
         # 存储前一轮的知识向量
         self.previous_knowledge_vector = None
         
@@ -591,7 +591,7 @@ class LearnerRPN(nn.Module):
                 param.requires_grad = False
 
     def update(self, x):
-        feature_repr, fused_repr, _ = self.forward(x)
+        feature_repr, fused_repr = self.forward(x)
         if self.phase == "base_train":
             loss = self.compute_losses(feature_repr, fused_repr)
             self.update_previous_knowledge()
@@ -614,8 +614,8 @@ class LearnerRPN(nn.Module):
         combined_representation = torch.cat([feature_representation, knowledge_representation_expanded], dim=1)  # (N, 2 * latent_dim)
         fused_representation = self.fusion_layer(combined_representation)  # (N, latent_dim)
         # 5. 自监督预测
-        predicted_value = self.prediction_layer(fused_representation)  # (N, 1)
-        return feature_representation, fused_representation, predicted_value
+        # predicted_value = self.prediction_layer(fused_representation)  # (N, 1)
+        return feature_representation, fused_representation #, predicted_value
 
     def _initialize_weights(self):
         for m in self.feature_mapper:
@@ -628,8 +628,7 @@ class LearnerRPN(nn.Module):
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
                 nn.init.constant_(m.bias, 0)
-        
-
+    
         nn.init.zeros_(self.knowledge_vector)
 
     def compute_losses(self, predicted_value, target_value):
@@ -662,7 +661,7 @@ class LearnerRPN(nn.Module):
     def update_previous_knowledge(self):
         self.previous_knowledge_vector = self.knowledge_vector.detach().clone()
 
-    def compute_alignment_loss(feature_representation, fused_representation):
+    def compute_alignment_loss(self, feature_representation, fused_representation):
         # 对表示进行 Softmax 归一化
         current_probs = F.softmax(feature_representation, dim=1)
         learner_probs = F.softmax(fused_representation.detach(), dim=1)
@@ -672,7 +671,7 @@ class LearnerRPN(nn.Module):
             learner_probs,
             reduction='batchmean'
         )
-        return kl_loss
+        return {'alignment_loss': kl_loss}
 
     # def compute_alignment_loss(feature_representation, fused_representation):
     #     cosine_loss = 1 - F.cosine_similarity(feature_representation, fused_representation.detach(), dim=1).mean()

@@ -930,7 +930,7 @@ class LearnerROI(nn.Module):
             nn.ReLU()
         )
         # 自监督预测层
-        self.prediction_layer = nn.Linear(latent_dim, 1)
+        # self.prediction_layer = nn.Linear(latent_dim, 1)
         # 存储前一轮的知识向量
         self.previous_knowledge_vector = None
 
@@ -940,7 +940,7 @@ class LearnerROI(nn.Module):
                 param.requires_grad = False
 
     def update(self, x):
-        feature_repr, fused_repr, _ = self.forward(x)
+        feature_repr, fused_repr = self.forward(x)
         if self.phase == "base_train":
             loss = self.compute_losses(feature_repr, fused_repr)
             self.update_previous_knowledge()
@@ -962,8 +962,8 @@ class LearnerROI(nn.Module):
         combined_representation = torch.cat([feature_representation, knowledge_representation_expanded], dim=1)
         fused_representation = self.fusion_layer(combined_representation)  # (N, latent_dim)
         # 4. 自监督预测
-        predicted_value = self.prediction_layer(fused_representation)  # (N, 1)
-        return feature_representation, fused_representation, predicted_value
+        # predicted_value = self.prediction_layer(fused_representation)  # (N, 1)
+        return feature_representation, fused_representation #, predicted_value
 
 
     def _initialize_weights(self):
@@ -1010,7 +1010,7 @@ class LearnerROI(nn.Module):
     def update_previous_knowledge(self):
         self.previous_knowledge_vector = self.knowledge_vector.detach().clone()
 
-    def compute_alignment_loss(feature_representation, fused_representation):
+    def compute_alignment_loss(self, feature_representation, fused_representation):
         # 使用 KL 散度损失
         current_probs = F.softmax(feature_representation, dim=1)
         learner_probs = F.softmax(fused_representation.detach(), dim=1)
@@ -1019,5 +1019,5 @@ class LearnerROI(nn.Module):
             learner_probs,
             reduction='batchmean'
         )
-        return kl_loss
+        return {'alignment_loss': kl_loss}
     
