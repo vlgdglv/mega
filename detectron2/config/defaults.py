@@ -309,10 +309,7 @@ _C.MODEL.RPN.POST_NMS_TOPK_TEST = 1000
 _C.MODEL.RPN.NMS_THRESH = 0.7
 # Set this to -1 to use the same number of output channels as input channels.
 _C.MODEL.RPN.CONV_DIMS = [-1]
-# learner
-_C.MODEL.RPN.ENGAGE_LEARNER = False
-_C.MODEL.RPN.LEARNER_DIM = 512
-_C.MODEL.RPN.LEARNER_FREEZE = False
+
 
 # ---------------------------------------------------------------------------- #
 # ROI HEADS options
@@ -788,3 +785,19 @@ _C.DE.OFFLINE_RPN_CONFIG = None
 _C.DE.OFFLINE_RPN_LSJ_PRETRAINED = False
 _C.DE.OFFLINE_RPN_NMS_THRESH = None
 _C.DE.OFFLINE_RPN_POST_NMS_TOPK_TEST = None
+
+
+# ---------------------------------------------------------------------------- #
+# MeGA options
+# ---------------------------------------------------------------------------- #
+
+_C.MEGA = CN()
+# learner
+# Enable meta learner
+_C.MEGA.ENABLE = False
+# Learning phase: ["base_train", "novel_train"]
+_C.MEGA.PHASE = "None"
+# Latent space dim for rpn
+_C.MEGA.RPN_LEARNER_DIM = 512
+# Latent space dim for roi head
+_C.MEGA.ROIHEADS_LEARNER_DIM = 512

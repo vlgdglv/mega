@@ -151,8 +151,8 @@ class StandardRPNHead(nn.Module):
         assert (
             len(set(num_anchors)) == 1
         ), "Each level must have the same number of anchors per spatial position"
-        if cfg.MODEL.RPN.ENGAGE_LEARNER:
-            learner = LearnerRPN(feature_dim=in_channels, latent_dim=cfg.MODEL.RPN.LEARNER_DIM, freeze=cfg.MODEL.RPN.LEARNER_FREEZE)
+        if cfg.MEGA.ENABLE:
+            learner = LearnerRPN(in_channels=in_channels, latent_dim=cfg.MEGA.RPN_LEARNER_DIM, phase=cfg.MEGA.PHASE)
         else:
             learner = None
         return {
@@ -178,23 +178,26 @@ class StandardRPNHead(nn.Module):
         """
         pred_objectness_logits = []
         pred_anchor_deltas = []
-        latent_outputs, align_losses = [], []
+        learner_losses = []
 
         for x in features:
             t = self.conv(x)
             pred_objectness_logits.append(self.objectness_logits(t)) # Conv2d(1024, 15, kernel_size=(1, 1), stride=(1, 1))
             pred_anchor_deltas.append(self.anchor_deltas(t)) # Conv2d(1024, 60, kernel_size=(1, 1), stride=(1, 1))
             if self.learner is not None:
-                feature_repr, fused_repr, _ = self.learner(t)
-                # 计算表示对齐损失
-                align_loss = self.learner.compute_alignment_loss(feature_repr, fused_repr)
-                align_losses.append(align_loss)
+                loss = self.learner.update(x)
+                learner_losses.append(loss)
 
         if self.learner is not None:
-            total_align_loss = sum(align_losses) / len(align_losses)
-            return pred_objectness_logits, pred_anchor_deltas, total_align_loss
+            accumulated_sums = {key: torch.tensor(0., device=x.device) for key in learner_losses[0].keys()}
+            for entry in learner_losses:
+                for key in accumulated_sums:
+                    accumulated_sums[key] += entry[key]
+            averages = {key: accumulated_sums[key] / len(learner_losses) for key in accumulated_sums}
+            learner_loss = torch.stack([averages[key] for key in averages.keys()]).sum()
+            return pred_objectness_logits, pred_anchor_deltas, {'rpn_learner_loss': learner_loss}
         else:
-            return pred_objectness_logits, pred_anchor_deltas
+            return pred_objectness_logits, pred_anchor_deltas, None
 
 
 @PROPOSAL_GENERATOR_REGISTRY.register()
@@ -471,7 +474,7 @@ class RPN(nn.Module):
         features = [features[f] for f in self.in_features]
         anchors = self.anchor_generator(features) # list of [63000, 4]
 
-        pred_objectness_logits, pred_anchor_deltas = self.rpn_head(features) # list of [1, 1024, 55, 50]
+        pred_objectness_logits, pred_anchor_deltas, learner_loss = self.rpn_head(features) # list of [1, 1024, 55, 50]
         # Transpose the Hi*Wi*A dimension to the middle:
         pred_objectness_logits = [ # list of [1, 41250]
             # (N, A, Hi, Wi) -> (N, Hi, Wi, A) -> (N, Hi*Wi*A)
@@ -492,6 +495,8 @@ class RPN(nn.Module):
             losses = self.losses(
                 anchors, pred_objectness_logits, gt_labels, pred_anchor_deltas, gt_boxes
             )
+            if learner_loss is not None:
+                losses.update(learner_loss)
         else:
             losses = {}
         proposals = self.predict_proposals(
@@ -555,7 +560,7 @@ class RPN(nn.Module):
 
 
 class LearnerRPN(nn.Module):
-    def __init__(self, in_channels, latent_dim=512, freeze=False):
+    def __init__(self, in_channels, latent_dim=512, phase=None):
         super(LearnerRPN, self).__init__()
         # 特征映射到潜在空间的映射函数
         self.feature_mapper = nn.Sequential(
@@ -579,10 +584,23 @@ class LearnerRPN(nn.Module):
         self.prediction_layer = nn.Linear(latent_dim, 1)
         # 存储前一轮的知识向量
         self.previous_knowledge_vector = None
-
-        if freeze:
+        
+        self.phase = phase
+        if phase == "novel_train":
             for param in self.parameters():
                 param.requires_grad = False
+
+    def update(self, x):
+        feature_repr, fused_repr, _ = self.forward(x)
+        if self.phase == "base_train":
+            loss = self.compute_losses(feature_repr, fused_repr)
+            self.update_previous_knowledge()
+            return loss
+        elif self.phase == "novel_train":
+            align_loss = self.compute_alignment_loss(feature_repr, fused_repr)
+            return align_loss
+        else:
+            return torch.tensor(0, dtype=x.dtype, device=x.device)
 
     def forward(self, x):
         batch_size = x.size(0)

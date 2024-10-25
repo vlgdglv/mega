@@ -568,6 +568,7 @@ class StandardROIHeads(ROIHeads):
         keypoint_pooler: Optional[ROIPooler] = None,
         keypoint_head: Optional[nn.Module] = None,
         train_on_pred_boxes: bool = False,
+        learner: Optional[nn.Module] = None,
         **kwargs,
     ):
         """
@@ -610,6 +611,7 @@ class StandardROIHeads(ROIHeads):
             self.keypoint_head = keypoint_head
 
         self.train_on_pred_boxes = train_on_pred_boxes
+        self.learner = learner
 
     @classmethod
     def from_config(cls, cfg, input_shape):
@@ -626,6 +628,11 @@ class StandardROIHeads(ROIHeads):
             ret.update(cls._init_mask_head(cfg, input_shape))
         if inspect.ismethod(cls._init_keypoint_head):
             ret.update(cls._init_keypoint_head(cfg, input_shape))
+        if cfg.MEGA.ENABLE:
+            learner = LearnerROI(input_shape=ret["box_head"].output_shape, latent_dim=cfg.MEGA.ROIHEADS_LEARNER_DIM, phase=cfg.MEGA.PHASE)
+        else:
+            learner = None
+        ret["learner"] = learner
         return ret
 
     @classmethod
@@ -812,19 +819,18 @@ class StandardROIHeads(ROIHeads):
         box_features = self.box_pooler(features, [x.proposal_boxes for x in proposals])
         box_features = self.box_head(box_features)
         
-        box_features_flat = box_features.view(box_features.size(0), -1)
-        if self.learner_roi is not None:
-            feature_repr, fused_repr, _ = self.learner_roi(box_features_flat)
-            # 计算表示对齐损失
-            align_loss_roi = self.learner_roi.compute_alignment_loss(feature_repr, fused_repr)
-        else:
-            align_loss_roi = 0.0
-
         predictions = self.box_predictor(box_features)
+        box_features_flat = box_features.view(box_features.size(0), -1)
         del box_features
 
         if self.training:
             losses = self.box_predictor.losses(predictions, proposals)
+
+            if self.learner is not None:
+                learner_loss = self.learner.update(box_features_flat)
+                learner_loss = torch.stack([learner_loss[key] for key in learner_loss.keys()]).sum()
+                losses["roi_learner_loss"] = learner_loss
+
             # proposals is modified in-place below, so losses must be computed first.
             if self.train_on_pred_boxes:
                 with torch.no_grad():
@@ -836,10 +842,7 @@ class StandardROIHeads(ROIHeads):
             return losses
         else:
             pred_instances, _ = self.box_predictor.inference(predictions, proposals)
-            if self.learner_roi is not None:
-                return pred_instances, align_loss_roi
-            else:
-                return pred_instances
+            return pred_instances
 
     def _forward_mask(self, features: Dict[str, torch.Tensor], instances: List[Instances]):
         """
@@ -904,11 +907,14 @@ class StandardROIHeads(ROIHeads):
 
 
 class LearnerROI(nn.Module):
-    def __init__(self, in_features, latent_dim):
+    def __init__(self, input_shape, latent_dim=512, phase=None):
         super(LearnerROI, self).__init__()
+        if isinstance(input_shape, int):  # some backward compatibility
+            input_shape = ShapeSpec(channels=input_shape)
+        input_size = input_shape.channels * (input_shape.width or 1) * (input_shape.height or 1)
         # 特征映射到潜在空间的映射函数
         self.feature_mapper = nn.Sequential(
-            nn.Linear(in_features, latent_dim),
+            nn.Linear(input_size, latent_dim),
             nn.ReLU()
         )
         # 知识向量的映射函数
@@ -928,7 +934,23 @@ class LearnerROI(nn.Module):
         # 存储前一轮的知识向量
         self.previous_knowledge_vector = None
 
+        self.phase = phase
+        if phase == "novel_train":
+            for param in self.parameters():
+                param.requires_grad = False
 
+    def update(self, x):
+        feature_repr, fused_repr, _ = self.forward(x)
+        if self.phase == "base_train":
+            loss = self.compute_losses(feature_repr, fused_repr)
+            self.update_previous_knowledge()
+            return loss
+        elif self.phase == "novel_train":
+            align_loss = self.compute_alignment_loss(feature_repr, fused_repr)
+            return align_loss
+        else:
+            return torch.tensor(0, dtype=x.dtype, device=x.device)
+        
     def forward(self, x):
         # x: (N, in_features)
         # 1. 获取当前特征表示

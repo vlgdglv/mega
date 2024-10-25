@@ -107,7 +107,6 @@ class GeneralizedRCNN(nn.Module):
             "pixel_std": cfg.MODEL.PIXEL_STD,
             "use_clip_c4": cfg.MODEL.BACKBONE.NAME == "build_clip_resnet_backbone",
             "use_clip_attpool": cfg.MODEL.ROI_HEADS.NAME == 'CLIPRes5ROIHeads' and cfg.MODEL.CLIP.USE_TEXT_EMB_CLASSIFIER,
-
         }
 
     @property
