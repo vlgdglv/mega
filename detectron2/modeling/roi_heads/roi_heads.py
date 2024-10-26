@@ -628,8 +628,13 @@ class StandardROIHeads(ROIHeads):
             ret.update(cls._init_mask_head(cfg, input_shape))
         if inspect.ismethod(cls._init_keypoint_head):
             ret.update(cls._init_keypoint_head(cfg, input_shape))
-        if cfg.MEGA.ENABLE:
-            learner = LearnerROI(input_shape=ret["box_head"].output_shape, latent_dim=cfg.MEGA.ROIHEADS_LEARNER_DIM, phase=cfg.MEGA.PHASE)
+        if False: #cfg.MEGA.ENABLE:
+            learner = LearnerROI(input_shape=ret["box_head"].output_shape, 
+                                 latent_dim=cfg.MEGA.ROIHEADS_LEARNER_DIM, 
+                                 phase=cfg.MEGA.PHASE,
+                                 entropy_loss_weights=cfg.MEGA.ENTROPY_LOSS_WEIGHTS,
+                                 rep_loss_weights=cfg.MEGA.REP_LOSS_WEIGHTS, 
+                                 guide_weight=cfg.MEGA.GUIDE_WEIGHT)
         else:
             learner = None
         ret["learner"] = learner
@@ -907,33 +912,35 @@ class StandardROIHeads(ROIHeads):
 
 
 class LearnerROI(nn.Module):
-    def __init__(self, input_shape, latent_dim=512, phase=None):
+    def __init__(self, input_shape, latent_dim=512, phase=None, 
+                 entropy_loss_weights=1.0,
+                 rep_loss_weights=1.0,
+                 guide_weight=1.0, ):
         super(LearnerROI, self).__init__()
         if isinstance(input_shape, int):  # some backward compatibility
             input_shape = ShapeSpec(channels=input_shape)
         input_size = input_shape.channels * (input_shape.width or 1) * (input_shape.height or 1)
-        # 特征映射到潜在空间的映射函数
+        self.tester = torch.ones(1, input_shape.channels, (input_shape.width or 1), (input_shape.height or 1))
         self.feature_mapper = nn.Sequential(
             nn.Linear(input_size, latent_dim),
             nn.ReLU()
         )
-        # 知识向量的映射函数
         self.knowledge_mapper = nn.Sequential(
             nn.Linear(latent_dim, latent_dim),
             nn.ReLU()
         )
-        # 学到的知识向量
-        self.knowledge_vector = nn.Parameter(torch.zeros(latent_dim), requires_grad=True)
-        # 融合层
-        self.fusion_layer = nn.Sequential(
-            nn.Linear(2 * latent_dim, latent_dim),
-            nn.ReLU()
-        )
-        # 自监督预测层
-        # self.prediction_layer = nn.Linear(latent_dim, 1)
-        # 存储前一轮的知识向量
+        self.knowledge_vector = nn.Parameter(torch.ones(latent_dim), requires_grad=True)
+        # self.fusion_layer = nn.Sequential(
+        #     nn.Linear(2 * latent_dim, latent_dim),
+        #     nn.ReLU()
+        # )
         self.previous_knowledge_vector = None
-
+        self.loss_weights = {
+            "entropy_loss": entropy_loss_weights,
+            "rep_loss": rep_loss_weights,
+        }
+        self.guide_weight = guide_weight
+        self._initialize_weights()
         self.phase = phase
         if phase == "novel_train":
             for param in self.parameters():
@@ -953,17 +960,15 @@ class LearnerROI(nn.Module):
         
     def forward(self, x):
         # x: (N, in_features)
-        # 1. 获取当前特征表示
         feature_representation = self.feature_mapper(x)  # (N, latent_dim)
-        # 2. 获取知识表示
         knowledge_representation = self.knowledge_mapper(self.knowledge_vector)  # (latent_dim)
-        knowledge_representation_expanded = knowledge_representation.unsqueeze(0).expand(x.size(0), -1)  # (N, latent_dim)
-        # 3. 融合特征表示和知识表示
-        combined_representation = torch.cat([feature_representation, knowledge_representation_expanded], dim=1)
-        fused_representation = self.fusion_layer(combined_representation)  # (N, latent_dim)
+        knowledge_representation = knowledge_representation.unsqueeze(0).expand(x.size(0), -1)  # (N, latent_dim)
+    
+        # combined_representation = torch.cat([feature_representation, knowledge_representation_expanded], dim=1)
+        # fused_representation = self.fusion_layer(combined_representation)  # (N, latent_dim)
         # 4. 自监督预测
         # predicted_value = self.prediction_layer(fused_representation)  # (N, 1)
-        return feature_representation, fused_representation #, predicted_value
+        return feature_representation, knowledge_representation #, predicted_value
 
 
     def _initialize_weights(self):
@@ -976,18 +981,15 @@ class LearnerROI(nn.Module):
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
                 nn.init.constant_(m.bias, 0)
-
-
-        nn.init.zeros_(self.knowledge_vector)
+        # nn.init.zeros_(self.knowledge_vector)
 
     def compute_losses(self, predicted_value, target_value):
         losses = {}
-        # 信息熵正则化损失
         losses['entropy_loss'] = self._entropy_loss()
-        # 时间差分损失
-        losses['temporal_difference_loss'] = self._temporal_difference_loss()
-        # 自监督预测损失
-        losses['self_supervised_prediction_loss'] = self._self_supervised_prediction_loss(predicted_value, target_value)
+        # losses['temporal_difference_loss'] = self._temporal_difference_loss()
+        losses['rep_loss'] = self._self_supervised_prediction_loss(predicted_value, target_value)
+        for k, v in losses.items():
+            losses[k] = v * self.loss_weights[k]
         return losses
 
 
@@ -1004,20 +1006,29 @@ class LearnerROI(nn.Module):
             return td_loss
 
     def _self_supervised_prediction_loss(self, predicted_value, target_value):
+        # ssp_loss = F.mse_loss(predicted_value.squeeze(), target_value)
+        # current_probs = F.softmax(predicted_value, dim=1)
+        # learner_probs = F.softmax(target_value, dim=1)
+        # kl_loss = F.kl_div(
+        #     current_probs.log(),
+        #     learner_probs,
+        #     reduction='batchmean'
+        # )
         ssp_loss = F.mse_loss(predicted_value.squeeze(), target_value)
         return ssp_loss
 
     def update_previous_knowledge(self):
         self.previous_knowledge_vector = self.knowledge_vector.detach().clone()
 
-    def compute_alignment_loss(self, feature_representation, fused_representation):
+    def compute_alignment_loss(self, x1, x2):
         # 使用 KL 散度损失
-        current_probs = F.softmax(feature_representation, dim=1)
-        learner_probs = F.softmax(fused_representation.detach(), dim=1)
-        kl_loss = F.kl_div(
-            current_probs.log(),
-            learner_probs,
-            reduction='batchmean'
-        )
-        return {'alignment_loss': kl_loss}
+        # current_probs = F.softmax(feature_representation, dim=1)
+        # learner_probs = F.softmax(fused_representation.detach(), dim=1)
+        # align_loss = F.kl_div(
+        #     current_probs.log(),
+        #     learner_probs,
+        #     reduction='batchmean'
+        # )
+        align_loss = F.mse_loss(x1, x2)
+        return {'roi_align_loss': align_loss * self.guide_weight}
     

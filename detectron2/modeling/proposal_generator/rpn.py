@@ -152,7 +152,13 @@ class StandardRPNHead(nn.Module):
             len(set(num_anchors)) == 1
         ), "Each level must have the same number of anchors per spatial position"
         if cfg.MEGA.ENABLE:
-            learner = LearnerRPN(in_channels=in_channels, latent_dim=cfg.MEGA.RPN_LEARNER_DIM, phase=cfg.MEGA.PHASE)
+            learner = LearnerRPN(in_channels=in_channels, 
+                                 latent_dim=cfg.MEGA.RPN_LEARNER_DIM, 
+                                 phase=cfg.MEGA.PHASE,
+                                 entropy_loss_weights=cfg.MEGA.ENTROPY_LOSS_WEIGHTS,
+                                 rep_loss_weights=cfg.MEGA.REP_LOSS_WEIGHTS,
+                                 guide_weight=cfg.MEGA.GUIDE_WEIGHT,
+                                 in_features=len(cfg.MODEL.RPN.IN_FEATURES))
         else:
             learner = None
         return {
@@ -184,18 +190,17 @@ class StandardRPNHead(nn.Module):
             t = self.conv(x)
             pred_objectness_logits.append(self.objectness_logits(t)) # Conv2d(1024, 15, kernel_size=(1, 1), stride=(1, 1))
             pred_anchor_deltas.append(self.anchor_deltas(t)) # Conv2d(1024, 60, kernel_size=(1, 1), stride=(1, 1))
-            if self.learner is not None:
-                loss = self.learner.update(x)
-                learner_losses.append(loss)
+  
 
         if self.learner is not None:
-            accumulated_sums = {key: torch.tensor(0., device=x.device) for key in learner_losses[0].keys()}
-            for entry in learner_losses:
-                for key in accumulated_sums:
-                    accumulated_sums[key] += entry[key]
-            averages = {key: accumulated_sums[key] / len(learner_losses) for key in accumulated_sums}
-            learner_loss = torch.stack([averages[key] for key in averages.keys()]).sum()
-            return pred_objectness_logits, pred_anchor_deltas, {'rpn_learner_loss': learner_loss}
+            learner_losses = self.learner.update(self.conv)
+            # accumulated_sums = {key: torch.tensor(0., device=x.device) for key in learner_losses[0].keys()}
+            # for entry in learner_losses:
+            #     for key in accumulated_sums:
+            #         accumulated_sums[key] += entry[key]
+            # averages = {key: accumulated_sums[key] / len(learner_losses) for key in accumulated_sums}
+            # learner_loss = torch.stack([averages[key] for key in averages.keys()]).sum()
+            return pred_objectness_logits, pred_anchor_deltas, {'rpn_learner_loss': learner_losses}
         else:
             return pred_objectness_logits, pred_anchor_deltas, None
 
@@ -560,119 +565,104 @@ class RPN(nn.Module):
 
 
 class LearnerRPN(nn.Module):
-    def __init__(self, in_channels, latent_dim=512, phase=None):
+    def __init__(self, in_channels, latent_dim=512, phase=None, 
+                 entropy_loss_weights=1.0,
+                 rep_loss_weights=1.0, 
+                 guide_weight=1.0, 
+                 in_features=1):
         super(LearnerRPN, self).__init__()
-        # 特征映射到潜在空间的映射函数
-        self.feature_mapper = nn.Sequential(
-            nn.Conv2d(in_channels, latent_dim, kernel_size=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d(1)  # 全局平均池化
-        )
-        # 知识向量的映射函数
-        self.knowledge_mapper = nn.Sequential(
-            nn.Linear(latent_dim, latent_dim),
-            nn.ReLU()
-        )
-        # 学到的知识向量
-        self.knowledge_vector = nn.Parameter(torch.zeros(latent_dim), requires_grad=True)
-        # 融合层（例如，特征拼接加全连接层）
-        self.fusion_layer = nn.Sequential(
-            nn.Linear(2 * latent_dim, latent_dim),
-            nn.ReLU()
-        )
-        # 自监督预测层
-        # self.prediction_layer = nn.Linear(latent_dim, 1)
-        # 存储前一轮的知识向量
-        self.previous_knowledge_vector = None
         
+        # self.stander = nn.Parameter(torch.normal(mean=0.446, std=1, size=(1, 256, 224, 224)), requires_grad=False)
+        self.stander = nn.Parameter(torch.ones((1, 256, 224, 224)), requires_grad=False)
+        
+        self.shooter = nn.Sequential(
+            # nn.Conv2d(in_channels, latent_dim, kernel_size=1),
+            # nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(in_channels, latent_dim),
+            nn.ReLU(),
+        )
+    
+        self.watcher = nn.Parameter(torch.ones(latent_dim), requires_grad=True)
+        self.max_lookback_steps = 12
+        self.previous_vectors = []
+        self.guide_weight = guide_weight
+        self.loss_weights = {
+            "rep_loss": rep_loss_weights,
+        }
         self.phase = phase
+        self._initialize_weights()
         if phase == "novel_train":
             for param in self.parameters():
                 param.requires_grad = False
 
-    def update(self, x):
-        feature_repr, fused_repr = self.forward(x)
+    def update(self, conv):
+        conv_rep = self.forward(conv(self.stander))
         if self.phase == "base_train":
-            loss = self.compute_losses(feature_repr, fused_repr)
-            self.update_previous_knowledge()
+            self.update_previous_knowledge(conv_rep)
+            loss = self.compute_losses(conv_rep)
             return loss
         elif self.phase == "novel_train":
-            align_loss = self.compute_alignment_loss(feature_repr, fused_repr)
+            align_loss = self.compute_alignment_loss(conv_rep)
             return align_loss
+            pass
         else:
-            return torch.tensor(0, dtype=x.dtype, device=x.device)
+            return torch.tensor(0, dtype=self.stander.dtype, device=self.stander.device)
 
     def forward(self, x):
-        batch_size = x.size(0)
-        # 1. 获取当前特征表示（通过 feature_mapper）
-        feature_representation = self.feature_mapper(x).view(batch_size, -1)  # (N, latent_dim)
-        # 2. 获取知识表示（通过 knowledge_mapper）
-        knowledge_representation = self.knowledge_mapper(self.knowledge_vector)  # (latent_dim)
-        # 3. 扩展知识表示以匹配批次大小
-        knowledge_representation_expanded = knowledge_representation.unsqueeze(0).expand(batch_size, -1)  # (N, latent_dim)
-        # 4. 融合特征表示和知识表示
-        combined_representation = torch.cat([feature_representation, knowledge_representation_expanded], dim=1)  # (N, 2 * latent_dim)
-        fused_representation = self.fusion_layer(combined_representation)  # (N, latent_dim)
-        # 5. 自监督预测
-        # predicted_value = self.prediction_layer(fused_representation)  # (N, 1)
-        return feature_representation, fused_representation #, predicted_value
+        high_rep = self.shooter(x)
+        return high_rep
 
     def _initialize_weights(self):
-        for m in self.feature_mapper:
+        for m in self.shooter:
             if isinstance(m, nn.Conv2d):
                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
-        for m in self.knowledge_mapper:
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
-                nn.init.constant_(m.bias, 0)
-    
-        nn.init.zeros_(self.knowledge_vector)
+    def compute_losses(self, conv_rep):
+        rep_loss = F.mse_loss(conv_rep.squeeze(), self.watcher, reduction='mean')
+        # rep_loss = self.cross_entropy(cosine_sim, target)
+        # conv_rep_prob = F.softmax(conv_rep.squeeze(), dim=0)
+        # watcher_prob = F.softmax(self.watcher, dim=0)
 
-    def compute_losses(self, predicted_value, target_value):
-        losses = {}
-        losses['entropy_loss'] = self._entropy_loss()
-        losses['temporal_difference_loss'] = self._temporal_difference_loss()
-        losses['self_supervised_prediction_loss'] = self._self_supervised_prediction_loss(predicted_value, target_value)
-        return losses
+        # rep_loss = F.kl_div(conv_rep_prob.log(), watcher_prob, reduction='sum')
+        return rep_loss * self.loss_weights["rep_loss"]
+    
+    def compute_alignment_loss(self, x1):
+        # x1 = F.softmax(x1.squeeze(), dim=0)
+        # watcher_prob = F.softmax(self.watcher, dim=0)
+        # align_loss = F.kl_div(x1.log(), watcher_prob, reduction='sum')
+        align_loss = F.mse_loss(x1.squeeze(), self.watcher)
+        return align_loss * self.guide_weight
+    
+    def update_previous_knowledge(self, conv_rep):
+        self.previous_vectors.append(conv_rep.squeeze().detach().clone())
+        if len(self.previous_vectors) > self.max_lookback_steps:
+            self.previous_vectors.pop(0)
 
     def _entropy_loss(self):
-        # 对知识向量进行 Softmax 归一化, 计算信息熵
         knowledge_probs = torch.softmax(self.knowledge_vector, dim=0)  # (latent_dim,)
         entropy = -torch.sum(knowledge_probs * torch.log(knowledge_probs + 1e-8))
         return entropy
 
     def _temporal_difference_loss(self):
         if self.previous_knowledge_vector is None:
-            # 初始情况下，时间差分损失为零
             return torch.tensor(0.0, device=self.knowledge_vector.device)
         else:
-            # 计算当前和前一轮知识向量的差异
             td_loss = torch.norm(self.knowledge_vector - self.previous_knowledge_vector.detach(), p=2) ** 2
             return td_loss
 
     def _self_supervised_prediction_loss(self, predicted_value, target_value):
-        # 计算 MSE 损失
         ssp_loss = F.mse_loss(predicted_value.squeeze(), target_value)
+        # current_probs = F.softmax(predicted_value, dim=1)
+        # learner_probs = F.softmax(target_value, dim=1)
+        # ssp_loss = F.kl_div(
+        #     current_probs.log(),
+        #     learner_probs,
+        #     reduction='batchmean'
+        # )
+        # ssp_loss = F.l1_loss(predicted_value.squeeze(), target_value)
         return ssp_loss
 
-    def update_previous_knowledge(self):
-        self.previous_knowledge_vector = self.knowledge_vector.detach().clone()
-
-    def compute_alignment_loss(self, feature_representation, fused_representation):
-        # 对表示进行 Softmax 归一化
-        current_probs = F.softmax(feature_representation, dim=1)
-        learner_probs = F.softmax(fused_representation.detach(), dim=1)
-        # 计算 KL 散度损失
-        kl_loss = F.kl_div(
-            current_probs.log(),
-            learner_probs,
-            reduction='batchmean'
-        )
-        return {'alignment_loss': kl_loss}
-
-    # def compute_alignment_loss(feature_representation, fused_representation):
-    #     cosine_loss = 1 - F.cosine_similarity(feature_representation, fused_representation.detach(), dim=1).mean()
-    #     return cosine_loss

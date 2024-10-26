@@ -16,8 +16,8 @@ IMAGENET_PRETRAIN_TORCH=weights/ImageNetPretrained/torchvision/resnet101-5d3b4d8
 
 surgery(){
     python3 foreign/model_surgery.py --dataset coco --method remove                         \
-        --src-path checkpoints/coco/base_r101/model_final.pth                        \
-        --save-dir checkpoints/coco/base_r101
+        --src-path ${SAVEDIR}/ft_r101_base/model_final.pth                        \
+        --save-dir ${SAVEDIR}/ft_r101_base
 }
 
 
@@ -32,6 +32,9 @@ ft_base(){
             OUTPUT_DIR ${SAVEDIR}/ft_r101_base \
             MEGA.ENABLE True  \
             MEGA.PHASE base_train
+    python3 foreign/model_surgery.py --dataset coco --method remove                         \
+        --src-path ${SAVEDIR}/ft_r101_base/model_final.pth                        \
+        --save-dir ${SAVEDIR}/ft_r101_base
 }
 
 fs_novel(){
@@ -44,17 +47,18 @@ fs_novel(){
             CONFIG_PATH=configs/coco/fsod_r101_novel_${shot}shot_seed${seed}.yaml
             OUTPUT_DIR=${SAVEDIR}/fsod_r101_novel/fsrw-like/${shot}shot_seed${seed}
             CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python3 foreign/train_start.py --num-gpus 7 --config-file ${CONFIG_PATH} \
-                            MODEL.WEIGHTS ${BASE_WEIGHT} \
+                            MODEL.WEIGHTS checkpoints/coco/${EXPNAME}/ft_r101_base/model_reset_remove.pth \
                             OUTPUT_DIR ${OUTPUT_DIR} \
-                            MEGA.ENABLE True  \
-                            MEGA.PHASE novel_train
+                            MEGA.ENABLE True \
+                            MEGA.PHASE novel_train \
+                            MEGA.GUIDE_WEIGHT 100.0
             rm $CONFIG_PATH
         done
     done
 }
 case $1 in
     "ft_base")
-        fs_base
+        ft_base
         ;;
     "fs_novel")
         fs_novel
