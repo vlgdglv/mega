@@ -628,8 +628,10 @@ class StandardROIHeads(ROIHeads):
             ret.update(cls._init_mask_head(cfg, input_shape))
         if inspect.ismethod(cls._init_keypoint_head):
             ret.update(cls._init_keypoint_head(cfg, input_shape))
-        if False: #cfg.MEGA.ENABLE:
-            learner = LearnerROI(input_shape=ret["box_head"].output_shape, 
+        if cfg.MEGA.ENABLE:
+            learner = LearnerROI(input_channels=input_shape['p6'].channels,
+                                 pooler_resolution=cfg.MODEL.ROI_BOX_HEAD.POOLER_RESOLUTION,
+                                 output_dim=cfg.MODEL.ROI_BOX_HEAD.FC_DIM,
                                  latent_dim=cfg.MEGA.ROIHEADS_LEARNER_DIM, 
                                  phase=cfg.MEGA.PHASE,
                                  entropy_loss_weights=cfg.MEGA.ENTROPY_LOSS_WEIGHTS,
@@ -832,8 +834,7 @@ class StandardROIHeads(ROIHeads):
             losses = self.box_predictor.losses(predictions, proposals)
 
             if self.learner is not None:
-                learner_loss = self.learner.update(box_features_flat)
-                learner_loss = torch.stack([learner_loss[key] for key in learner_loss.keys()]).sum()
+                learner_loss = self.learner.update(self.box_head)
                 losses["roi_learner_loss"] = learner_loss
 
             # proposals is modified in-place below, so losses must be computed first.
@@ -912,123 +913,60 @@ class StandardROIHeads(ROIHeads):
 
 
 class LearnerROI(nn.Module):
-    def __init__(self, input_shape, latent_dim=512, phase=None, 
+    def __init__(self, input_channels, pooler_resolution, output_dim,
+                 latent_dim=512, phase=None, 
                  entropy_loss_weights=1.0,
                  rep_loss_weights=1.0,
                  guide_weight=1.0, ):
         super(LearnerROI, self).__init__()
-        if isinstance(input_shape, int):  # some backward compatibility
-            input_shape = ShapeSpec(channels=input_shape)
-        input_size = input_shape.channels * (input_shape.width or 1) * (input_shape.height or 1)
-        self.tester = torch.ones(1, input_shape.channels, (input_shape.width or 1), (input_shape.height or 1))
-        self.feature_mapper = nn.Sequential(
-            nn.Linear(input_size, latent_dim),
-            nn.ReLU()
+    
+
+        self.stander = nn.Parameter(torch.ones((1, input_channels, pooler_resolution, pooler_resolution)), requires_grad=False)
+        self.shooter = nn.Sequential(
+            nn.Linear(output_dim, latent_dim),
+            nn.ReLU(),
         )
-        self.knowledge_mapper = nn.Sequential(
-            nn.Linear(latent_dim, latent_dim),
-            nn.ReLU()
-        )
-        self.knowledge_vector = nn.Parameter(torch.ones(latent_dim), requires_grad=True)
-        # self.fusion_layer = nn.Sequential(
-        #     nn.Linear(2 * latent_dim, latent_dim),
-        #     nn.ReLU()
-        # )
-        self.previous_knowledge_vector = None
+        self.watcher = nn.Parameter(torch.ones(latent_dim), requires_grad=True)
+        self.max_lookback_steps = 12
+        self.previous_vectors = []
+        self.guide_weight = guide_weight
         self.loss_weights = {
-            "entropy_loss": entropy_loss_weights,
             "rep_loss": rep_loss_weights,
         }
-        self.guide_weight = guide_weight
+    
         self._initialize_weights()
         self.phase = phase
         if phase == "novel_train":
             for param in self.parameters():
                 param.requires_grad = False
 
-    def update(self, x):
-        feature_repr, fused_repr = self.forward(x)
+    def update(self, doer):
+        rep = self.forward(doer(self.stander))
         if self.phase == "base_train":
-            loss = self.compute_losses(feature_repr, fused_repr)
-            self.update_previous_knowledge()
+            # self.update_previous_knowledge(rep)
+            loss = self.compute_losses(rep)
             return loss
         elif self.phase == "novel_train":
-            align_loss = self.compute_alignment_loss(feature_repr, fused_repr)
+            align_loss = self.compute_alignment_loss(rep)
             return align_loss
         else:
-            return torch.tensor(0, dtype=x.dtype, device=x.device)
-        
-    def forward(self, x):
-        # x: (N, in_features)
-        feature_representation = self.feature_mapper(x)  # (N, latent_dim)
-        knowledge_representation = self.knowledge_mapper(self.knowledge_vector)  # (latent_dim)
-        knowledge_representation = knowledge_representation.unsqueeze(0).expand(x.size(0), -1)  # (N, latent_dim)
-    
-        # combined_representation = torch.cat([feature_representation, knowledge_representation_expanded], dim=1)
-        # fused_representation = self.fusion_layer(combined_representation)  # (N, latent_dim)
-        # 4. 自监督预测
-        # predicted_value = self.prediction_layer(fused_representation)  # (N, 1)
-        return feature_representation, knowledge_representation #, predicted_value
+            return torch.tensor(0, dtype=self.stander.dtype, device=self.stander.device)
 
+    def forward(self, x):
+        high_rep = self.shooter(x)
+        return high_rep
 
     def _initialize_weights(self):
-        for m in self.feature_mapper:
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
-                nn.init.constant_(m.bias, 0)
-        
-        for m in self.knowledge_mapper:
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight, mode='fan_in', nonlinearity='relu')
-                nn.init.constant_(m.bias, 0)
-        # nn.init.zeros_(self.knowledge_vector)
+        for m in self.shooter:
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
-    def compute_losses(self, predicted_value, target_value):
-        losses = {}
-        losses['entropy_loss'] = self._entropy_loss()
-        # losses['temporal_difference_loss'] = self._temporal_difference_loss()
-        losses['rep_loss'] = self._self_supervised_prediction_loss(predicted_value, target_value)
-        for k, v in losses.items():
-            losses[k] = v * self.loss_weights[k]
-        return losses
-
-
-    def _entropy_loss(self):
-        knowledge_probs = torch.softmax(self.knowledge_vector, dim=0)
-        entropy = -torch.sum(knowledge_probs * torch.log(knowledge_probs + 1e-8))
-        return entropy
-
-    def _temporal_difference_loss(self):
-        if self.previous_knowledge_vector is None:
-            return torch.tensor(0.0, device=self.knowledge_vector.device)
-        else:
-            td_loss = torch.norm(self.knowledge_vector - self.previous_knowledge_vector.detach(), p=2) ** 2
-            return td_loss
-
-    def _self_supervised_prediction_loss(self, predicted_value, target_value):
-        # ssp_loss = F.mse_loss(predicted_value.squeeze(), target_value)
-        # current_probs = F.softmax(predicted_value, dim=1)
-        # learner_probs = F.softmax(target_value, dim=1)
-        # kl_loss = F.kl_div(
-        #     current_probs.log(),
-        #     learner_probs,
-        #     reduction='batchmean'
-        # )
-        ssp_loss = F.mse_loss(predicted_value.squeeze(), target_value)
-        return ssp_loss
-
-    def update_previous_knowledge(self):
-        self.previous_knowledge_vector = self.knowledge_vector.detach().clone()
-
-    def compute_alignment_loss(self, x1, x2):
-        # 使用 KL 散度损失
-        # current_probs = F.softmax(feature_representation, dim=1)
-        # learner_probs = F.softmax(fused_representation.detach(), dim=1)
-        # align_loss = F.kl_div(
-        #     current_probs.log(),
-        #     learner_probs,
-        #     reduction='batchmean'
-        # )
-        align_loss = F.mse_loss(x1, x2)
-        return {'roi_align_loss': align_loss * self.guide_weight}
+    def compute_losses(self, conv_rep):
+        rep_loss = F.mse_loss(conv_rep.squeeze(), self.watcher, reduction='mean')
+        return rep_loss * self.loss_weights["rep_loss"]
     
+    def compute_alignment_loss(self, x1):
+        align_loss = F.mse_loss(x1.squeeze(), self.watcher)
+        return align_loss * self.guide_weight

@@ -22,13 +22,28 @@ surgery(){
 
 
 BASE_WEIGHT=checkpoints/coco/base_r101/model_reset_remove.pth
-
+ORI_WEIGHT=checkpoints/coco/base_r101/model_final.pth
 
 ft_base(){
 # Test Base:
     CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python3 foreign/train_start.py \
         --num-gpus 7 --config-file configs/coco/coco_ft_base.yaml \
             MODEL.WEIGHTS ${BASE_WEIGHT} \
+            OUTPUT_DIR ${SAVEDIR}/ft_r101_base \
+            MEGA.ENABLE True  \
+            MEGA.PHASE base_train \
+            MEGA.REP_LOSS_WEIGHTS 10.0 \
+            
+    python3 foreign/model_surgery.py --dataset coco --method remove                         \
+        --src-path ${SAVEDIR}/ft_r101_base/model_final.pth                        \
+        --save-dir ${SAVEDIR}/ft_r101_base
+}
+
+train_learner(){
+# Test Base:
+    CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python3 foreign/train_start.py \
+        --num-gpus 7 --config-file configs/coco/coco_learner.yaml \
+            MODEL.WEIGHTS ${ORI_WEIGHT} \
             OUTPUT_DIR ${SAVEDIR}/ft_r101_base \
             MEGA.ENABLE True  \
             MEGA.PHASE base_train
@@ -56,12 +71,16 @@ fs_novel(){
         done
     done
 }
+
 case $1 in
     "ft_base")
         ft_base
         ;;
     "fs_novel")
         fs_novel
+        ;;
+    "train_learner")
+        train_learner
         ;;
     "sur")
         surgery

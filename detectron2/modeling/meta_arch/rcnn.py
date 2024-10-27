@@ -89,12 +89,14 @@ class GeneralizedRCNN(nn.Module):
                 p.requires_grad = False
             print("building: froze backbone parameters")
         if cfg.MODEL.PROPOSAL_GENERATOR.FREEZE:
-            for p in proposal_generator.parameters():
-                p.requires_grad = False
+            for name, p in proposal_generator.named_parameters():
+                if name.split(".")[1] != "learner":
+                    p.requires_grad = False
             print("building: froze proposal_generator parameters")
         if cfg.MODEL.ROI_HEADS.FREEZE:
-            for p in roi_heads.parameters():
-                p.requires_grad = False
+            for name, p in roi_heads.named_parameters():
+                if name.split(".")[1] != "learner":
+                    p.requires_grad = False
             print("building: froze roi_heads parameters")
 
         return {

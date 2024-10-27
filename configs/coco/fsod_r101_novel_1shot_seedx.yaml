@@ -6,11 +6,8 @@ MODEL:
     DEPTH: 101
   BACKBONE:
     FREEZE: True
-  PROPOSAL_GENERATOR:
-    FREEZE: False
   ROI_HEADS:
     NUM_CLASSES: 20
-    POSITIVE_FRACTION: 0.5
 DATASETS:
   TRAIN: ('coco14_trainval_novel_1shot_seedx',)
   TEST: ('coco14_test_novel',)
