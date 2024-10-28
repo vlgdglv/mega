@@ -813,3 +813,107 @@ class FastRCNNOutputLayers(nn.Module):
         probs = F.softmax(scores, dim=-1)
         return probs.split(num_inst_per_image, dim=0)
 
+
+class FastRCNNContrastOutputs(FastRCNNOutputs):
+    """
+    Add a multi-task contrastive loss branch for FastRCNNOutputs
+    """
+    def __init__(
+        self,
+        box2box_transform,
+        pred_class_logits,
+        pred_proposal_deltas,
+        proposals,
+        smooth_l1_beta,
+        box_cls_feat_con,
+        criterion,
+        contrast_loss_weight,
+        box_reg_weight,
+        cl_head_only,
+    ):
+        """
+        Args:
+            box_cls_feat_con (Tensor): the projected features
+                to calculate supervised contrastive loss upon
+            criterion (SupConLoss <- nn.Module): SupConLoss is implemented in fsdet/modeling/contrastive_loss.py
+        """
+        self.box2box_transform = box2box_transform
+        self.pred_class_logits = pred_class_logits
+        self.pred_proposal_deltas = pred_proposal_deltas
+        self.num_preds_per_image = [len(p) for p in proposals]
+        self.smooth_l1_beta = smooth_l1_beta
+        self.box_cls_feat_con = box_cls_feat_con
+        self.criterion = criterion
+        self.contrast_loss_weight = contrast_loss_weight
+        self.box_reg_weight = box_reg_weight
+
+        self.cl_head_only = cl_head_only
+
+        box_type = type(proposals[0].proposal_boxes)
+        # cat(..., dim=0) concatenates over all images in the batch
+        self.proposals = box_type.cat([p.proposal_boxes for p in proposals])  # self.proposals = List[Boxes]
+        assert not self.proposals.tensor.requires_grad, "Proposals should not require gradients!"
+        self.image_shapes = [x.image_size for x in proposals]
+
+        # The following fields should exist only when training.
+        if proposals[0].has("gt_boxes"):
+            self.gt_boxes = box_type.cat([p.gt_boxes for p in proposals])
+            assert proposals[0].has("gt_classes")
+            self.gt_classes = cat([p.gt_classes for p in proposals], dim=0)
+            self.ious = cat([p.iou for p in proposals], dim=0)
+
+    @classmethod
+    def from_config(cls, cfg, input_shape):
+        return {
+            
+        }
+
+    def supervised_contrastive_loss(self):
+        contrastive_loss = self.criterion(self.box_cls_feat_con, self.gt_classes, self.ious)
+        return contrastive_loss
+
+    def losses(self, predictions, proposals):
+        if self.cl_head_only:
+            return {'loss_contrast': self.supervised_contrastive_loss()}
+        
+        scores, proposal_deltas = predictions
+
+        # parse classification outputs
+        gt_classes = (
+            cat([p.gt_classes for p in proposals], dim=0) if len(proposals) else torch.empty(0)
+        )
+        _log_classification_stats(scores, gt_classes)
+
+        # parse box regression outputs
+        if len(proposals):
+            proposal_boxes = cat([p.proposal_boxes.tensor for p in proposals], dim=0)  # Nx4
+            assert not proposal_boxes.requires_grad, "Proposals should not require gradients!"
+            # If "gt_boxes" does not exist, the proposals must be all negative and
+            # should not be included in regression loss computation.
+            # Here we just use proposal_boxes as an arbitrary placeholder because its
+            # value won't be used in self.box_reg_loss().
+            gt_boxes = cat(
+                [(p.gt_boxes if p.has("gt_boxes") else p.proposal_boxes).tensor for p in proposals],
+                dim=0,
+            )
+        else:
+            proposal_boxes = gt_boxes = torch.empty((0, 4), device=proposal_deltas.device)
+        
+        # loss weights
+        if self.cls_loss_weight is not None and self.cls_loss_weight.device != scores.device:
+            self.cls_loss_weight = self.cls_loss_weight.to(scores.device)
+        if self.focal_scaled_loss is not None:
+            loss_cls = self.focal_loss(scores, gt_classes, gamma=self.focal_scaled_loss)
+        else:    
+            loss_cls = cross_entropy(scores, gt_classes, reduction="mean") if self.cls_loss_weight is None else \
+                       cross_entropy(scores, gt_classes, reduction="mean", weight=self.cls_loss_weight)
+        
+                
+        losses = {
+            "loss_cls": loss_cls,
+            "loss_box_reg": self.box_reg_loss(
+                proposal_boxes, gt_boxes, proposal_deltas, gt_classes
+            ),
+            'loss_contrast': self.contrast_loss_weight * self.supervised_contrastive_loss(),
+        }
+        return {k: v * self.loss_weight.get(k, 1.0) for k, v in losses.items()}

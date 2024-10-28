@@ -157,7 +157,7 @@ class StandardRPNHead(nn.Module):
                                  phase=cfg.MEGA.PHASE,
                                  entropy_loss_weights=cfg.MEGA.ENTROPY_LOSS_WEIGHTS,
                                  rep_loss_weights=cfg.MEGA.REP_LOSS_WEIGHTS,
-                                 guide_weight=cfg.MEGA.GUIDE_WEIGHT,
+                                 guide_weight=cfg.MEGA.RPN_GUIDE_WEIGHT,
                                  in_features=len(cfg.MODEL.RPN.IN_FEATURES))
         else:
             learner = None
@@ -606,7 +606,6 @@ class LearnerRPN(nn.Module):
         elif self.phase == "novel_train":
             align_loss = self.compute_alignment_loss(conv_rep)
             return align_loss
-            pass
         else:
             return torch.tensor(0, dtype=self.stander.dtype, device=self.stander.device)
 
@@ -665,4 +664,3 @@ class LearnerRPN(nn.Module):
         # )
         # ssp_loss = F.l1_loss(predicted_value.squeeze(), target_value)
         return ssp_loss
-

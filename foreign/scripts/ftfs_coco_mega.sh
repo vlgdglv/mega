@@ -53,7 +53,7 @@ train_learner(){
 }
 
 fs_novel(){
-    for shot in 1 #1 3 5 10 30
+    for shot in 10 #1 3 5 10 30
     do
         for seed in 0 # 5 9
         do
@@ -66,7 +66,9 @@ fs_novel(){
                             OUTPUT_DIR ${OUTPUT_DIR} \
                             MEGA.ENABLE True \
                             MEGA.PHASE novel_train \
-                            MEGA.GUIDE_WEIGHT 100.0
+                            MEGA.ROIHEADS_GUIDE_WEIGHT 10.0 \
+                            MEGA.RPN_GUIDE_WEIGHT 100.0 \
+                            MEGA.ROIHEADS_LEARNER_DIM 512
             rm $CONFIG_PATH
         done
     done

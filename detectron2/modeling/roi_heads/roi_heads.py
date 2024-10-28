@@ -19,9 +19,13 @@ from ..poolers import ROIPooler
 from ..proposal_generator.proposal_utils import add_ground_truth_to_proposals
 from ..sampling import subsample_labels
 from .box_head import build_box_head
-from .fast_rcnn import FastRCNNOutputLayers
+from .fast_rcnn import FastRCNNOutputLayers, FastRCNNContrastOutputs
 from .keypoint_head import build_keypoint_head
 from .mask_head import build_mask_head
+from ..contrastives import (
+    SupConLoss,
+    ContrastiveEncoder
+)
 
 ROI_HEADS_REGISTRY = Registry("ROI_HEADS")
 ROI_HEADS_REGISTRY.__doc__ = """
@@ -636,7 +640,7 @@ class StandardROIHeads(ROIHeads):
                                  phase=cfg.MEGA.PHASE,
                                  entropy_loss_weights=cfg.MEGA.ENTROPY_LOSS_WEIGHTS,
                                  rep_loss_weights=cfg.MEGA.REP_LOSS_WEIGHTS, 
-                                 guide_weight=cfg.MEGA.GUIDE_WEIGHT)
+                                 guide_weight=cfg.MEGA.ROIHEADS_GUIDE_WEIGHT)
         else:
             learner = None
         ret["learner"] = learner
@@ -912,6 +916,89 @@ class StandardROIHeads(ROIHeads):
         return self.keypoint_head(features, instances)
 
 
+@ROI_HEADS_REGISTRY.register()
+class ContrastiveROIHeads(StandardROIHeads):
+    @configurable
+    def __init__(self, 
+                 *,
+                 contrast_loss_weight,
+                 box_reg_weight,
+                 weight_decay,
+                 decay_steps,
+                 decay_rate,
+                 con_loss, 
+                 encoder,
+                 **kwargs,
+                 ):
+        super().__init__(**kwargs)
+
+        self.contrast_loss_weight = contrast_loss_weight
+        self.box_reg_weight = box_reg_weight
+        self.weight_decay = weight_decay
+        self.decay_steps = decay_steps
+        self.decay_rate = decay_rate
+        self.con_loss = con_loss
+        self.encoder = encoder
+
+
+    @classmethod
+    def from_config(cls, cfg, input_shape):
+        ret = super().from_config(cfg, input_shape)
+        encoder = ContrastiveEncoder(
+            cfg.MODEL.ROI_BOX_HEAD.FC_DIM, 
+            cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.MLP_FEATURE_DIM
+        )
+        con_loss = SupConLoss(
+            cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.TEMPERATURE,
+            cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.IOU_THRESHOLD,
+            cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.REWEIGHT_FUNC
+        )
+        
+        ret["contrast_loss_weight"] = cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.LOSS_WEIGHT
+        ret["box_reg_weight"] = cfg.MODEL.ROI_BOX_HEAD.BOX_REG_WEIGHT
+        ret["weight_decay"] = cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.DECAY.ENABLED
+        ret["decay_steps"] = cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.DECAY.STEPS
+        ret["decay_rate"] = cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.DECAY.RATE
+        ret["num_classes"] = cfg.MODEL.ROI_HEADS.NUM_CLASSES
+        ret["con_loss"] = con_loss
+        ret["encoder"] = encoder
+        return ret
+
+
+    def _forward_box(self, features, proposals):
+        box_features = self.box_pooler(features, [x.proposal_boxes for x in proposals])
+        box_features = self.box_head(box_features)  # [None, FC_DIM]
+        pred_class_logits, pred_proposal_deltas = self.box_predictor(box_features)
+        box_features_contrast = self.encoder(box_features)
+        del box_features
+
+        if self.weight_decay:
+            storage = get_event_storage()
+            if int(storage.iter) in self.decay_steps:
+                self.contrast_loss_weight *= self.decay_rate
+
+        outputs = FastRCNNContrastOutputs(
+            self.box2box_transform,
+            pred_class_logits,
+            pred_proposal_deltas,
+            proposals,
+            self.smooth_l1_beta,
+            box_features_contrast,
+            self.criterion,
+            self.contrast_loss_weight,
+            self.box_reg_weight,
+            self.cl_head_only,
+        )
+        if self.training:
+            return outputs.losses()
+        else:
+            pred_instances, _ = outputs.inference(
+                self.test_score_thresh, self.test_nms_thresh, self.test_detections_per_img
+            )
+            return pred_instances
+
+
+
 class LearnerROI(nn.Module):
     def __init__(self, input_channels, pooler_resolution, output_dim,
                  latent_dim=512, phase=None, 
@@ -927,6 +1014,7 @@ class LearnerROI(nn.Module):
             nn.ReLU(),
         )
         self.watcher = nn.Parameter(torch.ones(latent_dim), requires_grad=True)
+        
         self.max_lookback_steps = 12
         self.previous_vectors = []
         self.guide_weight = guide_weight
