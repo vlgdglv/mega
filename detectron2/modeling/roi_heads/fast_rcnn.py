@@ -12,6 +12,10 @@ from detectron2.layers.soft_nms import batched_soft_nms
 from detectron2.modeling.box_regression import Box2BoxTransform
 from detectron2.structures import Boxes, Instances
 from detectron2.utils.events import get_event_storage
+from ..contrastives import (
+    SupConLoss,
+    ContrastiveEncoder
+)
 
 __all__ = ["fast_rcnn_inference", "FastRCNNOutputLayers"]
 
@@ -814,22 +818,19 @@ class FastRCNNOutputLayers(nn.Module):
         return probs.split(num_inst_per_image, dim=0)
 
 
-class FastRCNNContrastOutputs(FastRCNNOutputs):
+class FastRCNNContrastOutputs(FastRCNNOutputLayers):
     """
     Add a multi-task contrastive loss branch for FastRCNNOutputs
     """
+    @configurable
     def __init__(
         self,
-        box2box_transform,
-        pred_class_logits,
-        pred_proposal_deltas,
-        proposals,
-        smooth_l1_beta,
-        box_cls_feat_con,
-        criterion,
-        contrast_loss_weight,
-        box_reg_weight,
+        *,
         cl_head_only,
+        constrastive_criterion,
+        use_cossim,
+        cossim_scale,
+        **kwargs,
     ):
         """
         Args:
@@ -837,50 +838,79 @@ class FastRCNNContrastOutputs(FastRCNNOutputs):
                 to calculate supervised contrastive loss upon
             criterion (SupConLoss <- nn.Module): SupConLoss is implemented in fsdet/modeling/contrastive_loss.py
         """
-        self.box2box_transform = box2box_transform
-        self.pred_class_logits = pred_class_logits
-        self.pred_proposal_deltas = pred_proposal_deltas
-        self.num_preds_per_image = [len(p) for p in proposals]
-        self.smooth_l1_beta = smooth_l1_beta
-        self.box_cls_feat_con = box_cls_feat_con
-        self.criterion = criterion
-        self.contrast_loss_weight = contrast_loss_weight
-        self.box_reg_weight = box_reg_weight
+        super().__init__(**kwargs)
 
+        self.constrastive_criterion = constrastive_criterion
         self.cl_head_only = cl_head_only
+        self.use_cossim = use_cossim
+        self.cossim_scale = cossim_scale
 
-        box_type = type(proposals[0].proposal_boxes)
-        # cat(..., dim=0) concatenates over all images in the batch
-        self.proposals = box_type.cat([p.proposal_boxes for p in proposals])  # self.proposals = List[Boxes]
-        assert not self.proposals.tensor.requires_grad, "Proposals should not require gradients!"
-        self.image_shapes = [x.image_size for x in proposals]
-
-        # The following fields should exist only when training.
-        if proposals[0].has("gt_boxes"):
-            self.gt_boxes = box_type.cat([p.gt_boxes for p in proposals])
-            assert proposals[0].has("gt_classes")
-            self.gt_classes = cat([p.gt_classes for p in proposals], dim=0)
-            self.ious = cat([p.iou for p in proposals], dim=0)
 
     @classmethod
     def from_config(cls, cfg, input_shape):
-        return {
-            
-        }
-
-    def supervised_contrastive_loss(self):
-        contrastive_loss = self.criterion(self.box_cls_feat_con, self.gt_classes, self.ious)
-        return contrastive_loss
-
-    def losses(self, predictions, proposals):
-        if self.cl_head_only:
-            return {'loss_contrast': self.supervised_contrastive_loss()}
+        ret = super().from_config(cfg, input_shape)
+        constrastive_criterion = SupConLoss(
+            cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.TEMPERATURE,
+            cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.IOU_THRESHOLD,
+            cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.REWEIGHT_FUNC
+        )
+        ret["cl_head_only"] = cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.HEAD_ONLY
+        ret["constrastive_criterion"] = constrastive_criterion
         
+        ret["use_cossim"] = cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.USE_COSSIM
+        ret["cossim_scale"] = cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.COSSIM_SCALE
+        return ret
+    
+
+    def forward(self, x):
+        """
+        Args:
+            x: per-region features of shape (N, ...) for N bounding boxes to predict.
+
+        Returns:
+            (Tensor, Tensor):
+            First tensor: shape (N,K+1), scores for each of the N box. Each row contains the
+            scores for K object categories and 1 background class.
+
+            Second tensor: bounding box regression deltas for each box. Shape is shape (N,Kx4),
+            or (N,4) for class-agnostic regression.
+        """
+        if x.dim() > 2:
+            x = torch.flatten(x, start_dim=1)
+        
+        # use clip text embeddings as classifier's weights
+        if self.use_cossim: 
+            normalized_x = F.normalize(x, p=2.0, dim=1)
+            normalized_weights = F.normalize(self.cls_score.weight, p=2, dim=1)
+            cos_dist = normalized_x @ normalized_weights.t()
+            scores = self.cossim_scale * cos_dist
+        # regular classifier
+        else:  
+            scores = self.cls_score(x)
+        
+        # box regression
+        proposal_deltas = self.bbox_pred(x)
+        return scores, proposal_deltas
+    
+    def losses(self, predictions, proposals, box_feat_con):
+        """
+        Args:
+            predictions: return values of :meth:`forward()`.
+            proposals (list[Instances]): proposals that match the features that were used
+                to compute predictions. The fields ``proposal_boxes``, ``gt_boxes``,
+                ``gt_classes`` are expected.
+
+        Returns:
+            Dict[str, Tensor]: dict of losses
+        """
         scores, proposal_deltas = predictions
 
         # parse classification outputs
         gt_classes = (
             cat([p.gt_classes for p in proposals], dim=0) if len(proposals) else torch.empty(0)
+        )
+        ious = (
+            cat([p.iou for p in proposals], dim=0) if len(proposals) else torch.empty(0.0)
         )
         _log_classification_stats(scores, gt_classes)
 
@@ -908,12 +938,11 @@ class FastRCNNContrastOutputs(FastRCNNOutputs):
             loss_cls = cross_entropy(scores, gt_classes, reduction="mean") if self.cls_loss_weight is None else \
                        cross_entropy(scores, gt_classes, reduction="mean", weight=self.cls_loss_weight)
         
-                
         losses = {
             "loss_cls": loss_cls,
             "loss_box_reg": self.box_reg_loss(
                 proposal_boxes, gt_boxes, proposal_deltas, gt_classes
             ),
-            'loss_contrast': self.contrast_loss_weight * self.supervised_contrastive_loss(),
+            "loss_contrast": self.constrastive_criterion(box_feat_con, gt_classes, ious)
         }
         return {k: v * self.loss_weight.get(k, 1.0) for k, v in losses.items()}

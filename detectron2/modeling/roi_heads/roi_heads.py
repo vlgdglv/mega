@@ -921,23 +921,17 @@ class ContrastiveROIHeads(StandardROIHeads):
     @configurable
     def __init__(self, 
                  *,
-                 contrast_loss_weight,
-                 box_reg_weight,
                  weight_decay,
                  decay_steps,
-                 decay_rate,
-                 con_loss, 
+                 decay_rate, 
                  encoder,
                  **kwargs,
                  ):
         super().__init__(**kwargs)
 
-        self.contrast_loss_weight = contrast_loss_weight
-        self.box_reg_weight = box_reg_weight
         self.weight_decay = weight_decay
         self.decay_steps = decay_steps
         self.decay_rate = decay_rate
-        self.con_loss = con_loss
         self.encoder = encoder
 
 
@@ -948,27 +942,22 @@ class ContrastiveROIHeads(StandardROIHeads):
             cfg.MODEL.ROI_BOX_HEAD.FC_DIM, 
             cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.MLP_FEATURE_DIM
         )
-        con_loss = SupConLoss(
-            cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.TEMPERATURE,
-            cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.IOU_THRESHOLD,
-            cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.REWEIGHT_FUNC
-        )
-        
-        ret["contrast_loss_weight"] = cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.LOSS_WEIGHT
-        ret["box_reg_weight"] = cfg.MODEL.ROI_BOX_HEAD.BOX_REG_WEIGHT
         ret["weight_decay"] = cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.DECAY.ENABLED
         ret["decay_steps"] = cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.DECAY.STEPS
         ret["decay_rate"] = cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.DECAY.RATE
         ret["num_classes"] = cfg.MODEL.ROI_HEADS.NUM_CLASSES
-        ret["con_loss"] = con_loss
+        
         ret["encoder"] = encoder
+        box_predictor = FastRCNNContrastOutputs(cfg, ret["box_head"].output_shape)
+        ret["box_predictor"] = box_predictor
         return ret
 
 
     def _forward_box(self, features, proposals):
+        features = [features[f] for f in self.box_in_features]
         box_features = self.box_pooler(features, [x.proposal_boxes for x in proposals])
         box_features = self.box_head(box_features)  # [None, FC_DIM]
-        pred_class_logits, pred_proposal_deltas = self.box_predictor(box_features)
+        predictions = self.box_predictor(box_features)
         box_features_contrast = self.encoder(box_features)
         del box_features
 
@@ -977,24 +966,31 @@ class ContrastiveROIHeads(StandardROIHeads):
             if int(storage.iter) in self.decay_steps:
                 self.contrast_loss_weight *= self.decay_rate
 
-        outputs = FastRCNNContrastOutputs(
-            self.box2box_transform,
-            pred_class_logits,
-            pred_proposal_deltas,
-            proposals,
-            self.smooth_l1_beta,
-            box_features_contrast,
-            self.criterion,
-            self.contrast_loss_weight,
-            self.box_reg_weight,
-            self.cl_head_only,
-        )
+        # outputs = FastRCNNContrastOutputs(
+        #     self.box2box_transform,
+        #     pred_class_logits,
+        #     pred_proposal_deltas,
+        #     proposals,
+        #     self.smooth_l1_beta,
+        #     box_features_contrast,
+        #     self.criterion,
+        #     self.contrast_loss_weight,
+        #     self.box_reg_weight,
+        #     self.cl_head_only,
+        # )
         if self.training:
-            return outputs.losses()
+            losses = self.box_predictor.losses(predictions, proposals, box_features_contrast)
+            # proposals is modified in-place below, so losses must be computed first.
+            if self.train_on_pred_boxes:
+                with torch.no_grad():
+                    pred_boxes = self.box_predictor.predict_boxes_for_gt_classes(
+                        predictions, proposals
+                    )
+                    for proposals_per_image, pred_boxes_per_image in zip(proposals, pred_boxes):
+                        proposals_per_image.proposal_boxes = Boxes(pred_boxes_per_image)
+            return losses
         else:
-            pred_instances, _ = outputs.inference(
-                self.test_score_thresh, self.test_nms_thresh, self.test_detections_per_img
-            )
+            pred_instances, _ = self.box_predictor.inference(predictions, proposals)
             return pred_instances
 
 
