@@ -444,7 +444,7 @@ class FastRCNNOutputLayers(nn.Module):
         if isinstance(input_shape, int):  # some backward compatibility
             input_shape = ShapeSpec(channels=input_shape)
         input_size = input_shape.channels * (input_shape.width or 1) * (input_shape.height or 1)
-                    
+        self.input_size = input_size
         self.use_clip_cls_emb = clip_cls_emb[0]
         if self.use_clip_cls_emb: # use CLIP text embeddings as classifier's weights
             input_size = clip_cls_emb[3] if clip_cls_emb[2] in ['CLIPRes5ROIHeads', 'CLIPStandardROIHeads'] else input_size
@@ -830,6 +830,7 @@ class FastRCNNContrastOutputs(FastRCNNOutputLayers):
         constrastive_criterion,
         use_cossim,
         cossim_scale,
+        cls_use_bias,
         **kwargs,
     ):
         """
@@ -845,6 +846,15 @@ class FastRCNNContrastOutputs(FastRCNNOutputLayers):
         self.use_cossim = use_cossim
         self.cossim_scale = cossim_scale
 
+        if not cls_use_bias:
+            self.cls_score = nn.Linear(self.input_size, self.num_classes + 1, bias=False) # one background class (hence + 1)
+            nn.init.normal_(self.cls_score.weight, std=0.01)
+
+        if self.cl_head_only:
+            for param in self.cls_score.parameters():
+                param.requires_grad = False
+            for param in self.bbox_pred.parameters():
+                param.requires_grad = False
 
     @classmethod
     def from_config(cls, cfg, input_shape):
@@ -856,9 +866,11 @@ class FastRCNNContrastOutputs(FastRCNNOutputLayers):
         )
         ret["cl_head_only"] = cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.HEAD_ONLY
         ret["constrastive_criterion"] = constrastive_criterion
+        ret["cls_use_bias"] = cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.USE_BIAS
         
         ret["use_cossim"] = cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.USE_COSSIM
         ret["cossim_scale"] = cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.COSSIM_SCALE
+        ret["loss_weight"].update({"loss_contrast": cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.LOSS_WEIGHT})
         return ret
     
 
@@ -913,6 +925,11 @@ class FastRCNNContrastOutputs(FastRCNNOutputLayers):
             cat([p.iou for p in proposals], dim=0) if len(proposals) else torch.empty(0.0)
         )
         _log_classification_stats(scores, gt_classes)
+
+        if self.cl_head_only:
+            return {
+                "loss_contrast": self.constrastive_criterion(box_feat_con, gt_classes, ious)
+            }
 
         # parse box regression outputs
         if len(proposals):

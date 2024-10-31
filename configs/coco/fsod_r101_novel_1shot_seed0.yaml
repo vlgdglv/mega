@@ -19,7 +19,7 @@ MODEL:
   #     IOU_THRESHOLD: 0.6
 
 DATASETS:
-  TRAIN: ('coco14_trainval_novel_1shot_seedx',)
+  TRAIN: ("coco14_trainval_novel_1shot_seed0", )
   TEST: ('coco14_test_novel',)
 SOLVER:
   IMS_PER_BATCH: 14

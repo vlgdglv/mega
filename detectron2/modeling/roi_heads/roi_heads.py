@@ -297,6 +297,10 @@ class ROIHeads(torch.nn.Module):
             proposals_per_image = proposals_per_image[sampled_idxs]
             proposals_per_image.gt_classes = gt_classes
 
+            # assign the iou
+            iou, _ = match_quality_matrix.max(dim=0)
+            proposals_per_image.iou = iou[sampled_idxs]
+
             if has_gt:
                 sampled_targets = matched_idxs[sampled_idxs]
                 # We index all the attributes of targets that start with "gt_"
@@ -964,7 +968,7 @@ class ContrastiveROIHeads(StandardROIHeads):
         if self.weight_decay:
             storage = get_event_storage()
             if int(storage.iter) in self.decay_steps:
-                self.contrast_loss_weight *= self.decay_rate
+                self.box_predictor.loss_weight["loss_contrast"] *= self.decay_rate
 
         # outputs = FastRCNNContrastOutputs(
         #     self.box2box_transform,

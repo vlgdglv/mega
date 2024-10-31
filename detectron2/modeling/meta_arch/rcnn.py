@@ -14,6 +14,7 @@ from detectron2.structures import ImageList, Instances, Boxes
 from detectron2.utils.events import get_event_storage
 from detectron2.utils.logger import log_first_n
 
+from .mega_model import GradientScalingLayer
 from ..backbone import Backbone, build_backbone
 from ..postprocessing import detector_postprocess
 from ..proposal_generator import build_proposal_generator
@@ -44,6 +45,8 @@ class GeneralizedRCNN(nn.Module):
         vis_period: int = 0,
         use_clip_c4: False,
         use_clip_attpool: False,
+        rpn_scaling_layer: Optional[nn.Module],
+        roihead_scaling_layer: Optional[nn.Module],
     ):
         """
         Args:
@@ -78,13 +81,29 @@ class GeneralizedRCNN(nn.Module):
         self.use_clip_c4 = use_clip_c4 # if True, use C4 mode where roi_head uses the last resnet layer from backbone 
         self.use_clip_attpool = use_clip_attpool # if True (C4+text_emb_as_classifier), use att_pool to replace default mean pool
 
+        self.rpn_scaling_layer = rpn_scaling_layer
+        self.roihead_scaling_layer = roihead_scaling_layer
+        if self.rpn_scaling_layer is not None and self.roihead_scaling_layer is not None:
+            self.enable_gradient_scaling = True
+        else:
+            self.enable_gradient_scaling = False
+
+
     @classmethod
     def from_config(cls, cfg):
         backbone = build_backbone(cfg)
-        proposal_generator = build_proposal_generator(cfg, backbone.output_shape())
-        roi_heads = build_roi_heads(cfg, backbone.output_shape())
+        input_shape = backbone.output_shape()
+        proposal_generator = build_proposal_generator(cfg, input_shape)
+        roi_heads = build_roi_heads(cfg, input_shape)
         
-        if cfg.MODEL.BACKBONE.FREEZE:
+        if cfg.MEGA.ENABLE_GRADIENT_SCALE:
+            num_channels = input_shape[cfg.MODEL.RPN.IN_FEATURES[-1]].channels
+            rpn_scaling_layer = GradientScalingLayer(num_channels, bias=True, scale=cfg.MEGA.RPN_GRADIENT_SCALE)
+            roihead_scaling_layer = GradientScalingLayer(num_channels, bias=True, scale=cfg.MEGA.ROIHEADS_GRADIENT_SCALE)
+        else:
+            rpn_scaling_layer, roihead_scaling_layer = None, None
+
+        if cfg.MODEL.BACKBONE.FREEZE:  
             for p in backbone.parameters():
                 p.requires_grad = False
             print("building: froze backbone parameters")
@@ -109,6 +128,8 @@ class GeneralizedRCNN(nn.Module):
             "pixel_std": cfg.MODEL.PIXEL_STD,
             "use_clip_c4": cfg.MODEL.BACKBONE.NAME == "build_clip_resnet_backbone",
             "use_clip_attpool": cfg.MODEL.ROI_HEADS.NAME == 'CLIPRes5ROIHeads' and cfg.MODEL.CLIP.USE_TEXT_EMB_CLASSIFIER,
+            "rpn_scaling_layer": rpn_scaling_layer,
+            "roihead_scaling_layer": roihead_scaling_layer
         }
 
     @property
@@ -185,7 +206,8 @@ class GeneralizedRCNN(nn.Module):
         features = self.backbone(images.tensor)
 
         if self.proposal_generator is not None:
-            proposals, proposal_losses = self.proposal_generator(images, features, gt_instances)
+            features_rpn = {k: self.rpn_scaling_layer(v) for k, v in features.items()} if self.enable_gradient_scaling else features
+            proposals, proposal_losses = self.proposal_generator(images, features_rpn, gt_instances)
         else:
             assert "proposals" in batched_inputs[0]
             proposals = [x["proposals"].to(self.device) for x in batched_inputs]
@@ -197,7 +219,8 @@ class GeneralizedRCNN(nn.Module):
             else: # use default mean pool
                 _, detector_losses = self.roi_heads(images, features, proposals, gt_instances, res5=self.backbone.layer4)
         else:  # default setting
-            _, detector_losses = self.roi_heads(images, features, proposals, gt_instances)
+            features_roi = {k: self.roihead_scaling_layer(v) for k, v in features.items()} if self.enable_gradient_scaling else features
+            _, detector_losses = self.roi_heads(images, features_roi, proposals, gt_instances)
         if self.vis_period > 0:
             storage = get_event_storage()
             if storage.iter % self.vis_period == 0:
