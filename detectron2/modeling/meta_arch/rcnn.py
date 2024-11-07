@@ -14,7 +14,7 @@ from detectron2.structures import ImageList, Instances, Boxes
 from detectron2.utils.events import get_event_storage
 from detectron2.utils.logger import log_first_n
 
-from .mega_model import GradientScalingLayer
+from ..mega_model import GradientScalingLayer
 from ..backbone import Backbone, build_backbone
 from ..postprocessing import detector_postprocess
 from ..proposal_generator import build_proposal_generator

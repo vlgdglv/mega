@@ -11,6 +11,7 @@ from detectron2.utils.events import get_event_storage
 from detectron2.utils.memory import retry_if_cuda_oom
 from detectron2.utils.registry import Registry
 
+from ..mega_model import RPNLearner
 from ..anchor_generator import build_anchor_generator
 from ..box_regression import Box2BoxTransform, _dense_box_regression_loss
 from ..matcher import Matcher
@@ -151,14 +152,18 @@ class StandardRPNHead(nn.Module):
         assert (
             len(set(num_anchors)) == 1
         ), "Each level must have the same number of anchors per spatial position"
-        if cfg.MEGA.ENABLE:
-            learner = LearnerRPN(in_channels=in_channels, 
-                                 latent_dim=cfg.MEGA.RPN_LEARNER_DIM, 
+        if cfg.MEGA.RPN_ENABLE:
+            learner = RPNLearner(in_channels=in_channels, 
+                                 hidden_dim=cfg.MEGA.RPN_LEARNER_HIDDEN_DIM,
+                                 latent_dim=cfg.MEGA.RPN_LEARNER_LATENT_DIM, 
                                  phase=cfg.MEGA.PHASE,
-                                 entropy_loss_weights=cfg.MEGA.ENTROPY_LOSS_WEIGHTS,
-                                 rep_loss_weights=cfg.MEGA.REP_LOSS_WEIGHTS,
-                                 guide_weight=cfg.MEGA.RPN_GUIDE_WEIGHT,
-                                 in_features=len(cfg.MODEL.RPN.IN_FEATURES))
+                                 recon_weight=cfg.MEGA.RPN_RECON_WEIGHT,
+                                 reg_weight=cfg.MEGA.RPN_REG_WEIGHT,
+                                #  entropy_loss_weights=cfg.MEGA.ENTROPY_LOSS_WEIGHTS,
+                                #  rep_loss_weights=cfg.MEGA.REP_LOSS_WEIGHTS,
+                                #  guide_weight=cfg.MEGA.RPN_GUIDE_WEIGHT,
+                                #  in_features=len(cfg.MODEL.RPN.IN_FEATURES)
+                               )
         else:
             learner = None
         return {
@@ -186,20 +191,20 @@ class StandardRPNHead(nn.Module):
         pred_anchor_deltas = []
         learner_losses = []
 
+        intermediate_feature = []
         for x in features:
             t = self.conv(x)
+            intermediate_feature.append(t)
             pred_objectness_logits.append(self.objectness_logits(t)) # Conv2d(1024, 15, kernel_size=(1, 1), stride=(1, 1))
             pred_anchor_deltas.append(self.anchor_deltas(t)) # Conv2d(1024, 60, kernel_size=(1, 1), stride=(1, 1))
   
 
         if self.learner is not None:
-            learner_losses = self.learner.update(self.conv)
-            # accumulated_sums = {key: torch.tensor(0., device=x.device) for key in learner_losses[0].keys()}
-            # for entry in learner_losses:
-            #     for key in accumulated_sums:
-            #         accumulated_sums[key] += entry[key]
-            # averages = {key: accumulated_sums[key] / len(learner_losses) for key in accumulated_sums}
-            # learner_loss = torch.stack([averages[key] for key in averages.keys()]).sum()
+            # learner_losses = torch.tensor(0.0, device=pred_objectness_logits[0].device)
+            # for in_feat, out_feat in zip(features, intermediate_feature):
+            #     learner_losses += self.learner.forward_and_loss(in_feat, out_feat)
+            
+            learner_losses = self.learner.forward_and_loss(features[-1], intermediate_feature[-1])
             return pred_objectness_logits, pred_anchor_deltas, {'rpn_learner_loss': learner_losses}
         else:
             return pred_objectness_logits, pred_anchor_deltas, None
@@ -564,103 +569,103 @@ class RPN(nn.Module):
 
 
 
-class LearnerRPN(nn.Module):
-    def __init__(self, in_channels, latent_dim=512, phase=None, 
-                 entropy_loss_weights=1.0,
-                 rep_loss_weights=1.0, 
-                 guide_weight=1.0, 
-                 in_features=1):
-        super(LearnerRPN, self).__init__()
+# class LearnerRPN(nn.Module):
+#     def __init__(self, in_channels, latent_dim=512, phase=None, 
+#                  entropy_loss_weights=1.0,
+#                  rep_loss_weights=1.0, 
+#                  guide_weight=1.0, 
+#                  in_features=1):
+#         super(LearnerRPN, self).__init__()
         
-        # self.stander = nn.Parameter(torch.normal(mean=0.446, std=1, size=(1, 256, 224, 224)), requires_grad=False)
-        self.stander = nn.Parameter(torch.ones((1, 256, 224, 224)), requires_grad=False)
+#         # self.stander = nn.Parameter(torch.normal(mean=0.446, std=1, size=(1, 256, 224, 224)), requires_grad=False)
+#         self.stander = nn.Parameter(torch.ones((1, 256, 224, 224)), requires_grad=False)
         
-        self.shooter = nn.Sequential(
-            # nn.Conv2d(in_channels, latent_dim, kernel_size=1),
-            # nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-            nn.Linear(in_channels, latent_dim),
-            nn.ReLU(),
-        )
+#         self.shooter = nn.Sequential(
+#             # nn.Conv2d(in_channels, latent_dim, kernel_size=1),
+#             # nn.ReLU(),
+#             nn.AdaptiveAvgPool2d((1, 1)),
+#             nn.Flatten(),
+#             nn.Linear(in_channels, latent_dim),
+#             nn.ReLU(),
+#         )
     
-        self.watcher = nn.Parameter(torch.ones(latent_dim), requires_grad=True)
-        self.max_lookback_steps = 12
-        self.previous_vectors = []
-        self.guide_weight = guide_weight
-        self.loss_weights = {
-            "rep_loss": rep_loss_weights,
-        }
-        self.phase = phase
-        self._initialize_weights()
-        if phase == "novel_train":
-            for param in self.parameters():
-                param.requires_grad = False
+#         self.watcher = nn.Parameter(torch.ones(latent_dim), requires_grad=True)
+#         self.max_lookback_steps = 12
+#         self.previous_vectors = []
+#         self.guide_weight = guide_weight
+#         self.loss_weights = {
+#             "rep_loss": rep_loss_weights,
+#         }
+#         self.phase = phase
+#         self._initialize_weights()
+#         if phase == "novel_train":
+#             for param in self.parameters():
+#                 param.requires_grad = False
 
-    def update(self, conv):
-        conv_rep = self.forward(conv(self.stander))
-        if self.phase == "base_train":
-            self.update_previous_knowledge(conv_rep)
-            loss = self.compute_losses(conv_rep)
-            return loss
-        elif self.phase == "novel_train":
-            align_loss = self.compute_alignment_loss(conv_rep)
-            return align_loss
-        else:
-            return torch.tensor(0, dtype=self.stander.dtype, device=self.stander.device)
+#     def update(self, conv):
+#         conv_rep = self.forward(conv(self.stander))
+#         if self.phase == "base_train":
+#             self.update_previous_knowledge(conv_rep)
+#             loss = self.compute_losses(conv_rep)
+#             return loss
+#         elif self.phase == "novel_train":
+#             align_loss = self.compute_alignment_loss(conv_rep)
+#             return align_loss
+#         else:
+#             return torch.tensor(0, dtype=self.stander.dtype, device=self.stander.device)
 
-    def forward(self, x):
-        high_rep = self.shooter(x)
-        return high_rep
+#     def forward(self, x):
+#         high_rep = self.shooter(x)
+#         return high_rep
 
-    def _initialize_weights(self):
-        for m in self.shooter:
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
+#     def _initialize_weights(self):
+#         for m in self.shooter:
+#             if isinstance(m, nn.Conv2d):
+#                 nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+#                 if m.bias is not None:
+#                     nn.init.constant_(m.bias, 0)
 
-    def compute_losses(self, conv_rep):
-        rep_loss = F.mse_loss(conv_rep.squeeze(), self.watcher, reduction='mean')
-        # rep_loss = self.cross_entropy(cosine_sim, target)
-        # conv_rep_prob = F.softmax(conv_rep.squeeze(), dim=0)
-        # watcher_prob = F.softmax(self.watcher, dim=0)
+#     def compute_losses(self, conv_rep):
+#         rep_loss = F.mse_loss(conv_rep.squeeze(), self.watcher, reduction='mean')
+#         # rep_loss = self.cross_entropy(cosine_sim, target)
+#         # conv_rep_prob = F.softmax(conv_rep.squeeze(), dim=0)
+#         # watcher_prob = F.softmax(self.watcher, dim=0)
 
-        # rep_loss = F.kl_div(conv_rep_prob.log(), watcher_prob, reduction='sum')
-        return rep_loss * self.loss_weights["rep_loss"]
+#         # rep_loss = F.kl_div(conv_rep_prob.log(), watcher_prob, reduction='sum')
+#         return rep_loss * self.loss_weights["rep_loss"]
     
-    def compute_alignment_loss(self, x1):
-        # x1 = F.softmax(x1.squeeze(), dim=0)
-        # watcher_prob = F.softmax(self.watcher, dim=0)
-        # align_loss = F.kl_div(x1.log(), watcher_prob, reduction='sum')
-        align_loss = F.mse_loss(x1.squeeze(), self.watcher)
-        return align_loss * self.guide_weight
+#     def compute_alignment_loss(self, x1):
+#         # x1 = F.softmax(x1.squeeze(), dim=0)
+#         # watcher_prob = F.softmax(self.watcher, dim=0)
+#         # align_loss = F.kl_div(x1.log(), watcher_prob, reduction='sum')
+#         align_loss = F.mse_loss(x1.squeeze(), self.watcher)
+#         return align_loss * self.guide_weight
     
-    def update_previous_knowledge(self, conv_rep):
-        self.previous_vectors.append(conv_rep.squeeze().detach().clone())
-        if len(self.previous_vectors) > self.max_lookback_steps:
-            self.previous_vectors.pop(0)
+#     def update_previous_knowledge(self, conv_rep):
+#         self.previous_vectors.append(conv_rep.squeeze().detach().clone())
+#         if len(self.previous_vectors) > self.max_lookback_steps:
+#             self.previous_vectors.pop(0)
 
-    def _entropy_loss(self):
-        knowledge_probs = torch.softmax(self.knowledge_vector, dim=0)  # (latent_dim,)
-        entropy = -torch.sum(knowledge_probs * torch.log(knowledge_probs + 1e-8))
-        return entropy
+#     def _entropy_loss(self):
+#         knowledge_probs = torch.softmax(self.knowledge_vector, dim=0)  # (latent_dim,)
+#         entropy = -torch.sum(knowledge_probs * torch.log(knowledge_probs + 1e-8))
+#         return entropy
 
-    def _temporal_difference_loss(self):
-        if self.previous_knowledge_vector is None:
-            return torch.tensor(0.0, device=self.knowledge_vector.device)
-        else:
-            td_loss = torch.norm(self.knowledge_vector - self.previous_knowledge_vector.detach(), p=2) ** 2
-            return td_loss
+#     def _temporal_difference_loss(self):
+#         if self.previous_knowledge_vector is None:
+#             return torch.tensor(0.0, device=self.knowledge_vector.device)
+#         else:
+#             td_loss = torch.norm(self.knowledge_vector - self.previous_knowledge_vector.detach(), p=2) ** 2
+#             return td_loss
 
-    def _self_supervised_prediction_loss(self, predicted_value, target_value):
-        ssp_loss = F.mse_loss(predicted_value.squeeze(), target_value)
-        # current_probs = F.softmax(predicted_value, dim=1)
-        # learner_probs = F.softmax(target_value, dim=1)
-        # ssp_loss = F.kl_div(
-        #     current_probs.log(),
-        #     learner_probs,
-        #     reduction='batchmean'
-        # )
-        # ssp_loss = F.l1_loss(predicted_value.squeeze(), target_value)
-        return ssp_loss
+#     def _self_supervised_prediction_loss(self, predicted_value, target_value):
+#         ssp_loss = F.mse_loss(predicted_value.squeeze(), target_value)
+#         # current_probs = F.softmax(predicted_value, dim=1)
+#         # learner_probs = F.softmax(target_value, dim=1)
+#         # ssp_loss = F.kl_div(
+#         #     current_probs.log(),
+#         #     learner_probs,
+#         #     reduction='batchmean'
+#         # )
+#         # ssp_loss = F.l1_loss(predicted_value.squeeze(), target_value)
+#         return ssp_loss

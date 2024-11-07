@@ -794,16 +794,20 @@ _C.DE.OFFLINE_RPN_POST_NMS_TOPK_TEST = None
 _C.MEGA = CN()
 # learner
 # Enable meta learner
-_C.MEGA.ENABLE = False
+_C.MEGA.RPN_ENABLE = False
+_C.MEGA.ROIHEAD_ENABLE = False
 # Learning phase: ["base_train", "novel_train"]
 _C.MEGA.PHASE = "None"
 # Latent space dim for rpn
-_C.MEGA.RPN_LEARNER_DIM = 512
+_C.MEGA.RPN_LEARNER_HIDDEN_DIM = 1024
+_C.MEGA.RPN_LEARNER_LATENT_DIM = 512
 # Latent space dim for roi head
 _C.MEGA.ROIHEADS_LEARNER_DIM = 512
 _C.MEGA.ENTROPY_LOSS_WEIGHTS = 1.0
 _C.MEGA.REP_LOSS_WEIGHTS = 1.0
-_C.MEGA.RPN_GUIDE_WEIGHT = 1.0
+_C.MEGA.RPN_RECON_WEIGHT = 1.0
+_C.MEGA.RPN_REG_WEIGHT = 1.0
+_C.MEGA.ROIHEADS_RECON_WEIGHT = 1.0
 _C.MEGA.ROIHEADS_GUIDE_WEIGHT = 1.0
 
 # perform Supervised Contrastive Loss within batch

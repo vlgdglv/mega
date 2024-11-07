@@ -10,6 +10,8 @@ datasets/coco
 datasets/lvis
 datasets/cifar-10-batches-py
 checkpoints/
+startups/
+startups.zip
 
 *.png
 *.json

@@ -636,7 +636,7 @@ class StandardROIHeads(ROIHeads):
             ret.update(cls._init_mask_head(cfg, input_shape))
         if inspect.ismethod(cls._init_keypoint_head):
             ret.update(cls._init_keypoint_head(cfg, input_shape))
-        if cfg.MEGA.ENABLE:
+        if cfg.MEGA.ROIHEAD_ENABLE:
             learner = LearnerROI(input_channels=input_shape['p6'].channels,
                                  pooler_resolution=cfg.MODEL.ROI_BOX_HEAD.POOLER_RESOLUTION,
                                  output_dim=cfg.MODEL.ROI_BOX_HEAD.FC_DIM,
