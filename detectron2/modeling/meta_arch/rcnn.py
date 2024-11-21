@@ -206,7 +206,9 @@ class GeneralizedRCNN(nn.Module):
         features = self.backbone(images.tensor)
 
         if self.proposal_generator is not None:
-            features_rpn = {k: self.rpn_scaling_layer(v) for k, v in features.items()} if self.enable_gradient_scaling else features
+            features_rpn = features
+            if self.rpn_scaling_layer is not None:
+                features_rpn = {k: self.rpn_scaling_layer(v) for k, v in features_rpn.items()} 
             proposals, proposal_losses = self.proposal_generator(images, features_rpn, gt_instances)
         else:
             assert "proposals" in batched_inputs[0]
@@ -219,7 +221,9 @@ class GeneralizedRCNN(nn.Module):
             else: # use default mean pool
                 _, detector_losses = self.roi_heads(images, features, proposals, gt_instances, res5=self.backbone.layer4)
         else:  # default setting
-            features_roi = {k: self.roihead_scaling_layer(v) for k, v in features.items()} if self.enable_gradient_scaling else features
+            features_roi = features
+            if self.roihead_scaling_layer is not None:
+                features_roi = {k: self.roihead_scaling_layer(v) for k, v in features_roi.items()}
             _, detector_losses = self.roi_heads(images, features_roi, proposals, gt_instances)
         if self.vis_period > 0:
             storage = get_event_storage()

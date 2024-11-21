@@ -24,6 +24,24 @@ surgery(){
 BASE_WEIGHT=checkpoints/coco/base_r101/model_reset_remove.pth
 ORI_WEIGHT=checkpoints/coco/base_r101/model_final.pth
 
+pretrain(){
+# Test Base:
+    CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python3 foreign/train_start.py \
+        --num-gpus 7 --config-file configs/coco/coco_pretrain.yaml     \
+        MODEL.WEIGHTS $IMAGENET_PRETRAIN \
+        OUTPUT_DIR ${SAVEDIR}/r101_base \
+        MEGA.RPN_ENABLE False \
+        MEGA.ROIHEAD_ENABLE False \
+        MEGA.PHASE base_train \
+        MEGA.ENABLE_GRADIENT_SCALE True \
+        MEGA.RPN_GRADIENT_SCALE 0.1 \
+        MEGA.ROIHEADS_GRADIENT_SCALE 0.75
+
+    python3 foreign/model_surgery.py --dataset coco --method remove                         \
+        --src-path ${SAVEDIR}/ft_r101_base/model_final.pth                        \
+        --save-dir ${SAVEDIR}/ft_r101_base
+}
+
 ft_base(){
 # Test Base:
     CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python3 foreign/train_start.py \
@@ -37,19 +55,6 @@ ft_base(){
             
     python3 foreign/model_surgery.py --dataset coco --method remove \
         --src-path ${SAVEDIR}/ft_r101_base/model_final.pth \
-        --save-dir ${SAVEDIR}/ft_r101_base
-}
-
-train_learner(){
-# Test Base:
-    CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python3 foreign/train_start.py \
-        --num-gpus 7 --config-file configs/coco/coco_learner.yaml \
-            MODEL.WEIGHTS ${ORI_WEIGHT} \
-            OUTPUT_DIR ${SAVEDIR}/ft_r101_base \
-            MEGA.ENABLE True  \
-            MEGA.PHASE base_train
-    python3 foreign/model_surgery.py --dataset coco --method remove                         \
-        --src-path ${SAVEDIR}/ft_r101_base/model_final.pth                        \
         --save-dir ${SAVEDIR}/ft_r101_base
 }
 
@@ -75,6 +80,9 @@ fs_novel(){
 }
 
 case $1 in
+    "pretrain")
+        pretrain
+        ;;
     "ft_base")
         ft_base
         ;;
