@@ -29,25 +29,6 @@ class AttentionAggregator(nn.Module):
         x_attn, y_attn = x * attention_weights, y * attention_weights
         return torch.cat((x_attn, y_attn), dim=1)
 
-class Encoder(nn.Module):
-    def __init__(self, input_dim, latent_dim):
-        super(Encoder, self).__init__()
-        self.fc = nn.Linear(input_dim, latent_dim)
-
-    def forward(self, x):
-        latent = torch.tanh(self.fc(x))
-        return latent
-
-class Decoder(nn.Module):
-    def __init__(self, latent_dim, output_dim):
-        super(Decoder, self).__init__()
-        self.fc = nn.Linear(latent_dim, output_dim)
-
-    def forward(self, z):
-        output = self.fc(z)
-        output = torch.tanh(output)
-        return output
-
 class RPNFeatureProjector(nn.Module):
     def __init__(self, input_channels, hidden_dim, pooled_size = 8):
         super(RPNFeatureProjector, self).__init__()
@@ -149,6 +130,75 @@ class RPNLearner(nn.Module):
 #         embeddings = self.embedding(features)  # (N, task_feature_dim)
 #         task_feature = embeddings.mean(dim=0)  # (task_feature_dim,)
 #         return task_feature
+
+class Encoder(nn.Module):
+    def __init__(self, input_dim, hidden_dims=[512] , latent_dim=512):
+        super(Encoder, self).__init__()
+        modules = []
+        last_dim = input_dim
+        for h_dim in hidden_dims:
+            modules.append(nn.Linear(last_dim, h_dim))
+            modules.append(nn.ReLU())  
+            last_dim = h_dim
+        self.encoder = nn.Sequential(*modules)
+        self.fc_mu = nn.Linear(last_dim, latent_dim)
+        self.fc_logvar = nn.Linear(last_dim, latent_dim)
+
+    def forward(self, x):
+        h = self.encoder(x)
+        mu = self.fc_mu(h)
+        logvar = self.fc_logvar(h)
+        return mu, logvar
+
+class Decoder(nn.Module):
+    def __init__(self, latent_dim=512, hidden_dims=[512], output_dim=256):
+        super(Decoder, self).__init__()
+        modules = []
+        last_dim = latent_dim
+        for h_dim in reversed(hidden_dims):
+            modules.append(nn.Linear(last_dim, h_dim))
+            modules.append(nn.ReLU())
+            last_dim = h_dim
+        self.decoder = nn.Sequential(*modules)
+        self.output_layer = nn.Linear(last_dim, output_dim)
+
+    def forward(self, z):
+        h = self.decoder(z)
+        output = self.output_layer(h)
+        output = torch.tanh(output)
+        return output
+
+class Learner(nn.Module):
+    def __init__(self, in_channels, hidden_dim, latent_dim, phase, 
+                 recon_weight=1.0, reg_weight=0.0):
+        super(Learner, self).__init__()
+        
+        self.hidden_dim = hidden_dim
+        # self.attention_aggregator = AttentionAggregator(hidden_dim)
+        self.encoder = Encoder(hidden_dim, latent_dim)  # Encoding both x and y
+        self.decoder = Decoder(latent_dim, hidden_dim)  # Assume y has same dimension as x
+        self.phase = phase
+        self.recon_weight = recon_weight
+        self.reg_weight = reg_weight
+
+
+    def forward(self, x, y):
+        mu, logvar = self.encoder(x) # [BS, LAT]
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+        y_pred = self.decoder(z) # [BS, HID]
+        return y_pred, y, mu, logvar
+
+    def forward_and_loss(self, x, y):
+        y_pred, y_target, mu, logvar = self.forward(x, y)
+        recon_loss = F.mse_loss(y_pred, y_target)
+        # reg_loss = torch.norm(z, p=2, dim=1).mean()
+        kld_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+        kld_loss = kld_loss / x.shape[0]
+        loss = recon_loss * self.recon_weight + kld_loss * self.reg_weight 
+        return loss
+
 
 class FiLM(nn.Module):
     def __init__(self, task_feature_dim: int, num_channels: int):

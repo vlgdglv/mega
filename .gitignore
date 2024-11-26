@@ -51,8 +51,9 @@ model_ts*.txt
 
 # editor settings
 .idea
-.vscode
+.vscode/*
 _darcs
+!.vscode/launch.json
 
 # project dirs
 /detectron2/model_zoo/configs

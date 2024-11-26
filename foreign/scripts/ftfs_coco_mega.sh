@@ -15,8 +15,8 @@ IMAGENET_PRETRAIN_TORCH=weights/ImageNetPretrained/torchvision/resnet101-5d3b4d8
 #         OUTPUT_DIR ${SAVEDIR}/r101_base \
 
 surgery(){
-    python3 foreign/model_surgery.py --dataset coco --method remove                         \
-        --src-path ${SAVEDIR}/ft_r101_base/model_final.pth                        \
+    python3 foreign/model_surgery.py --dataset coco --method remove  \
+        --src-path ${SAVEDIR}/ft_r101_base/model_final.pth           \
         --save-dir ${SAVEDIR}/ft_r101_base
 }
 
@@ -37,9 +37,9 @@ pretrain(){
         MEGA.RPN_GRADIENT_SCALE 0.1 \
         MEGA.ROIHEADS_GRADIENT_SCALE 0.75
 
-    python3 foreign/model_surgery.py --dataset coco --method remove                         \
-        --src-path ${SAVEDIR}/ft_r101_base/model_final.pth                        \
-        --save-dir ${SAVEDIR}/ft_r101_base
+    # python3 foreign/model_surgery.py --dataset coco --method remove                         \
+    #     --src-path ${SAVEDIR}/ft_r101_base/model_final.pth                        \
+    #     --save-dir ${SAVEDIR}/ft_r101_base
 }
 
 ft_base(){
