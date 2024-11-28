@@ -5,7 +5,7 @@ MODEL:
   RESNETS:
     DEPTH: 101
   BACKBONE:
-    FREEZE: True
+    FREEZE: False
   ROI_HEADS:
     NUM_CLASSES: 20
   # ROI_BOX_HEAD:

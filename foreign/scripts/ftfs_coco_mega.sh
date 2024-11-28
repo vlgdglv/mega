@@ -42,16 +42,20 @@ pretrain(){
     #     --save-dir ${SAVEDIR}/ft_r101_base
 }
 
+OFFICIAL_WEIGHT=checkpoints/coco/defrcn_one/defrcn_det_r101_base/model_reset_remove.pth
 ft_base(){
 # Test Base:
     CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python3 foreign/train_start.py \
         --num-gpus 7 --config-file configs/coco/coco_ft_base.yaml \
-            MODEL.WEIGHTS ${ORI_WEIGHT} \
+            MODEL.WEIGHTS ${OFFICIAL_WEIGHT} \
             OUTPUT_DIR ${SAVEDIR}/ft_r101_base \
             MEGA.RPN_ENABLE True \
-            MEGA.PHASE base_train 
-            # MEGA.RPN_RECON_WEIGHT 100.0 
-            # MEGA.RPN_REG_WEIGHT 1.0
+            MEGA.PHASE base_train \
+            MEGA.RPN_RECON_WEIGHT 1.0  \
+            MEGA.RPN_REG_WEIGHT 1.0 \
+            MEGA.ENABLE_GRADIENT_SCALE True \
+            MEGA.RPN_GRADIENT_SCALE 0.1 \
+            MEGA.ROIHEADS_GRADIENT_SCALE 0.75
             
     python3 foreign/model_surgery.py --dataset coco --method remove \
         --src-path ${SAVEDIR}/ft_r101_base/model_final.pth \
@@ -72,11 +76,28 @@ fs_novel(){
                             OUTPUT_DIR ${OUTPUT_DIR} \
                             MEGA.RPN_ENABLE True \
                             MEGA.PHASE novel_train \
-                            MEGA.RPN_RECON_WEIGHT 100.0 \
-                            MEGA.RPN_REG_WEIGHT 0.0
+                            MEGA.RPN_RECON_WEIGHT 1.0 \
+                            MEGA.RPN_REG_WEIGHT 1.0 \
+                            MEGA.ENABLE_GRADIENT_SCALE True \
+                            MEGA.RPN_GRADIENT_SCALE 0.1 \
+                            MEGA.ROIHEADS_GRADIENT_SCALE 0.1
+            
+
             rm $CONFIG_PATH
         done
     done
+}
+
+full_novel(){
+    CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python3 foreign/train_start.py \
+        --num-gpus 7 --config-file configs/coco/coco_ft_novel.yaml \
+            MODEL.WEIGHTS ${OFFICIAL_WEIGHT} \
+            OUTPUT_DIR ${SAVEDIR}/full_novel \
+            MEGA.RPN_ENABLE False \
+            MEGA.PHASE base_train \
+            MEGA.ENABLE_GRADIENT_SCALE True \
+            MEGA.RPN_GRADIENT_SCALE 0.0 \
+            MEGA.ROIHEADS_GRADIENT_SCALE 0.5
 }
 
 case $1 in
@@ -88,6 +109,9 @@ case $1 in
         ;;
     "fs_novel")
         fs_novel
+        ;;
+    "full_novel")
+        full_novel
         ;;
     "train_learner")
         train_learner

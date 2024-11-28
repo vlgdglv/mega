@@ -132,17 +132,19 @@ class RPNLearner(nn.Module):
 #         return task_feature
 
 class Encoder(nn.Module):
-    def __init__(self, input_dim, hidden_dims=[512] , latent_dim=512):
+    def __init__(self, input_dim, hidden_dims=512 , latent_dim=512):
         super(Encoder, self).__init__()
-        modules = []
-        last_dim = input_dim
-        for h_dim in hidden_dims:
-            modules.append(nn.Linear(last_dim, h_dim))
-            modules.append(nn.ReLU())  
-            last_dim = h_dim
-        self.encoder = nn.Sequential(*modules)
-        self.fc_mu = nn.Linear(last_dim, latent_dim)
-        self.fc_logvar = nn.Linear(last_dim, latent_dim)
+        # modules = []
+        # last_dim = input_dim
+        # for h_dim in hidden_dims:
+        #     modules.append(nn.Linear(last_dim, h_dim))
+        #     modules.append(nn.ReLU())  
+        #     last_dim = h_dim
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dims),
+            nn.ReLU(),)
+        self.fc_mu = nn.Linear(hidden_dims, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dims, latent_dim)
 
     def forward(self, x):
         h = self.encoder(x)
@@ -151,16 +153,19 @@ class Encoder(nn.Module):
         return mu, logvar
 
 class Decoder(nn.Module):
-    def __init__(self, latent_dim=512, hidden_dims=[512], output_dim=256):
+    def __init__(self, latent_dim, output_dim, hidden_dims=256):
         super(Decoder, self).__init__()
-        modules = []
-        last_dim = latent_dim
-        for h_dim in reversed(hidden_dims):
-            modules.append(nn.Linear(last_dim, h_dim))
-            modules.append(nn.ReLU())
-            last_dim = h_dim
-        self.decoder = nn.Sequential(*modules)
-        self.output_layer = nn.Linear(last_dim, output_dim)
+        # modules = []
+        # last_dim = latent_dim
+        # for h_dim in reversed(hidden_dims):
+        #     modules.append(nn.Linear(last_dim, h_dim))
+        #     modules.append(nn.ReLU())
+        #     last_dim = h_dim
+
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dims),
+            nn.ReLU(),)
+        self.output_layer = nn.Linear(hidden_dims, output_dim)
 
     def forward(self, z):
         h = self.decoder(z)
@@ -168,6 +173,56 @@ class Decoder(nn.Module):
         output = torch.tanh(output)
         return output
 
+class FeatureMapEncoder(nn.Module):
+    def __init__(self, input_channels=1024, embed_dim=256, num_heads=8, num_layers=2, use_tf=False):
+        super(FeatureMapEncoder, self).__init__()
+        self.embed_dim = embed_dim
+        self.use_tf = use_tf
+        if self.use_tf:
+            self.proj = nn.Linear(input_channels, embed_dim)
+            encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads)
+            self.transformer_encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+            self.fc = nn.Linear(embed_dim, embed_dim)
+            self.positional_encoding = PositionalEncoding(embed_dim)
+        else:
+            self.fc = nn.Linear(input_channels, embed_dim)
+
+    def forward(self, x):
+        # x: [BS, 1024, H, W]
+        BS, C, H, W = x.size()
+        x = x.view(BS, C, H * W)  # [BS, 1024, H*W]
+        x = x.permute(0, 2, 1)    # [BS, H*W, 1024]
+        if self.use_tf:
+            x = self.proj(x)          # [BS, H*W, embed_dim]
+            x = self.positional_encoding(x)
+            # expect [sequence_length, batch_size, embed_dim]
+            x = x.permute(1, 0, 2)    # [H*W, BS, embed_dim]
+            x = self.transformer_encoder(x)  # [H*W, BS, embed_dim]
+            x = x.mean(dim=0)         # [BS, embed_dim]
+        else:
+            x = x.mean(dim=1)         # [BS, 1024]
+        x = self.fc(x)            # [BS, input_dim]
+
+        return x
+
+class PositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=10000):
+        super(PositionalEncoding, self).__init__()
+
+        position = torch.arange(0, max_len).unsqueeze(1)  # [max_len, 1]
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-torch.log(torch.tensor(10000.0)) / d_model))
+        pe = torch.zeros(max_len, d_model)  # [max_len, d_model]
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(1)  # [max_len, 1, d_model]
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        # x: [BS, seq_len, embed_dim]
+        seq_len = x.size(1)
+        x = x + self.pe[:seq_len].permute(1, 0, 2)  # [BS, seq_len, embed_dim]
+        return x
+    
 class Learner(nn.Module):
     def __init__(self, in_channels, hidden_dim, latent_dim, phase, 
                  recon_weight=1.0, reg_weight=0.0):
@@ -175,11 +230,18 @@ class Learner(nn.Module):
         
         self.hidden_dim = hidden_dim
         # self.attention_aggregator = AttentionAggregator(hidden_dim)
+        self.projector = FeatureMapEncoder(input_channels=in_channels, embed_dim=hidden_dim)
         self.encoder = Encoder(hidden_dim, latent_dim)  # Encoding both x and y
         self.decoder = Decoder(latent_dim, hidden_dim)  # Assume y has same dimension as x
         self.phase = phase
         self.recon_weight = recon_weight
         self.reg_weight = reg_weight
+        if phase == "base_train":
+            self.scale_x, self.scale_y = 1.0, 1.0
+        elif phase == "novel_train":
+            self.scale_x, self.scale_y = 0.01, 0.1
+        else:
+            self.scale = 0.0
 
 
     def forward(self, x, y):
@@ -191,6 +253,8 @@ class Learner(nn.Module):
         return y_pred, y, mu, logvar
 
     def forward_and_loss(self, x, y):
+        x = scale_gradient(self.projector(x), self.scale_x)
+        y = scale_gradient(self.projector(y), self.scale_y) 
         y_pred, y_target, mu, logvar = self.forward(x, y)
         recon_loss = F.mse_loss(y_pred, y_target)
         # reg_loss = torch.norm(z, p=2, dim=1).mean()
@@ -223,6 +287,9 @@ class GradientScaling(Function):
     def backward(ctx, grad_output):
         grad_output = grad_output * ctx._lambda
         return grad_output, None
+
+def scale_gradient(x, _lambda):
+    return GradientScaling.apply(x, _lambda)
 
 class GradientScalingLayer(nn.Module):
     def __init__(self, num_channels, bias=True, scale=1.0):

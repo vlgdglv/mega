@@ -11,7 +11,7 @@ from detectron2.utils.events import get_event_storage
 from detectron2.utils.memory import retry_if_cuda_oom
 from detectron2.utils.registry import Registry
 
-from ..mega_model import RPNLearner
+from ..mega_model import RPNLearner, Learner
 from ..anchor_generator import build_anchor_generator
 from ..box_regression import Box2BoxTransform, _dense_box_regression_loss
 from ..matcher import Matcher
@@ -153,7 +153,7 @@ class StandardRPNHead(nn.Module):
             len(set(num_anchors)) == 1
         ), "Each level must have the same number of anchors per spatial position"
         if cfg.MEGA.RPN_ENABLE:
-            learner = RPNLearner(in_channels=in_channels, 
+            learner = Learner(in_channels=in_channels, 
                                  hidden_dim=cfg.MEGA.RPN_LEARNER_HIDDEN_DIM,
                                  latent_dim=cfg.MEGA.RPN_LEARNER_LATENT_DIM, 
                                  phase=cfg.MEGA.PHASE,
