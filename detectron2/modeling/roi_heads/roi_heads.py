@@ -483,6 +483,12 @@ class Res5ROIHeads(ROIHeads):
         return nn.Sequential(*blocks), out_channels
 
     def _shared_roi_transform(self, features, boxes):
+        """
+        boxes: List[BoxList], torch.Size([NUM_BOX, 4]) * BS
+        features[0] torch.Size([BS, 1024, H, W])
+        pooled_x: torch.Size([BS * NUM_BOX, 1024, 7, 7])
+        resed_x: torch.Size([BS * NUM_BOX, 2048, 4, 4])
+        """
         x = self.pooler(features, boxes)
         return self.res5(x)
 
@@ -496,7 +502,10 @@ class Res5ROIHeads(ROIHeads):
             assert targets
             proposals = self.label_and_sample_proposals(proposals, targets)
         del targets
-
+        """
+        features['res4']: torch.Size([14, 1024, 50, 75])
+        box_features: torch.Size([7168, 2048, 4, 4])
+        """
         proposal_boxes = [x.proposal_boxes for x in proposals]
         box_features = self._shared_roi_transform(
             [features[f] for f in self.in_features], proposal_boxes

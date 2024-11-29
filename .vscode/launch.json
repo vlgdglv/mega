@@ -18,8 +18,9 @@
                 "MEGA.PHASE", "base_train",
                 "MEGA.ENABLE_GRADIENT_SCALE", "True",
                 "MEGA.RPN_GRADIENT_SCALE", "0.1", "MEGA.ROIHEADS_GRADIENT_SCALE", "0.75",
+                "SOLVER.IMS_PER_BATCH", "4"
             ],
-            "env": {"CUDA_VISIBLE_DEVICES": "0"},
+            "env": {"CUDA_VISIBLE_DEVICES": "7"},
         }
     ]
 }

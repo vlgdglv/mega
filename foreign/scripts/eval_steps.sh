@@ -1,10 +1,11 @@
 #!/bin/bash
+export NCCL_DEBUG=WARN
 
-SEARCH_PATH="checkpoints/coco/exp1128/steps"
+SEARCH_PATH=checkpoints/coco/exp1128/$1
 
 python3 foreign/create_config.py --dataset coco14 --config_root configs/coco \
             --shot 1 --seed 0 --suffix novel
-CONFIG_PATH=configs/coco/fsod_r101_novel_${shot}shot_seed${seed}.yaml
+CONFIG_PATH=configs/coco/fsod_r101_novel_1shot_seed0.yaml
 OUTPUT_DIR=${SEARCH_PATH}/step_result
 mkdir -p $OUTPUT_DIR
 

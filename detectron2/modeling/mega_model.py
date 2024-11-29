@@ -263,6 +263,72 @@ class Learner(nn.Module):
         loss = recon_loss * self.recon_weight + kld_loss * self.reg_weight 
         return loss
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class VAE(nn.Module):
+    def __init__(self, input_channels=1024, output_channels=2048, latent_dim=512):
+        super(VAE, self).__init__()
+        self.encoder = Encoder(input_channels, latent_dim)
+        self.decoder = Decoder(latent_dim, output_channels)
+    
+    def forward(self, x):
+        mu, logvar = self.encoder(x)
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        z = mu + eps * std  # 重参数技巧
+        y_pred = self.decoder(z)
+        return y_pred, mu, logvar
+    
+    def loss_function(self, y_pred, y_true, mu, logvar):
+        recon_loss = F.mse_loss(y_pred, y_true, reduction='mean')
+        kld_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+        loss = recon_loss + kld_loss
+        return loss, recon_loss, kld_loss
+
+class Encoder(nn.Module):
+    def __init__(self, input_channels=1024, latent_dim=512):
+        super(Encoder, self).__init__()
+        self.conv1 = nn.Conv2d(input_channels, 512, kernel_size=3, stride=2, padding=1)  # 输出：[BS, 512, 4, 4]
+        self.bn1 = nn.BatchNorm2d(512)
+        self.conv2 = nn.Conv2d(512, 256, kernel_size=3, stride=2, padding=1)             # 输出：[BS, 256, 2, 2]
+        self.bn2 = nn.BatchNorm2d(256)
+        self.relu = nn.ReLU()
+        self.flatten = nn.Flatten()
+        self.fc_mu = nn.Linear(256 * 2 * 2, latent_dim)
+        self.fc_logvar = nn.Linear(256 * 2 * 2, latent_dim)
+    
+    def forward(self, x):
+        # x: [BS, 1024, 7, 7]
+        h = self.relu(self.bn1(self.conv1(x)))  # [BS, 512, 4, 4]
+        h = self.relu(self.bn2(self.conv2(h)))  # [BS, 256, 2, 2]
+        h = self.flatten(h)                     # [BS, 256 * 2 * 2]
+        mu = self.fc_mu(h)                      # [BS, latent_dim]
+        logvar = self.fc_logvar(h)              # [BS, latent_dim]
+        return mu, logvar
+
+class Decoder(nn.Module):
+    def __init__(self, latent_dim=512, output_channels=2048):
+        super(Decoder, self).__init__()
+        self.fc = nn.Linear(latent_dim, 256 * 2 * 2)
+        self.conv_trans1 = nn.ConvTranspose2d(256, 512, kernel_size=4, stride=2, padding=1)  # 输出：[BS, 512, 4, 4]
+        self.bn1 = nn.BatchNorm2d(512)
+        self.conv_trans2 = nn.ConvTranspose2d(512, output_channels, kernel_size=4, stride=2, padding=1)  # 输出：[BS, 2048, 8, 8]
+        self.bn2 = nn.BatchNorm2d(output_channels)
+        self.relu = nn.ReLU()
+        # [BS, 2048, 4, 4]
+        self.final_conv = nn.Conv2d(output_channels, output_channels, kernel_size=3, stride=1, padding=1)
+    
+    def forward(self, z):
+        h = self.fc(z)                          # [BS, 256 * 2 * 2]
+        h = h.view(h.size(0), 256, 2, 2)        # [BS, 256, 2, 2]
+        h = self.relu(self.bn1(self.conv_trans1(h)))  # [BS, 512, 4, 4]
+        h = self.relu(self.bn2(self.conv_trans2(h)))  # [BS, 2048, 8, 8]
+        h = F.interpolate(h, size=(4, 4), mode='bilinear', align_corners=False)  # 调整到 [BS, 2048, 4, 4]
+        h = self.final_conv(h)                  # [BS, 2048, 4, 4]
+        return h
+
 
 class FiLM(nn.Module):
     def __init__(self, task_feature_dim: int, num_channels: int):
