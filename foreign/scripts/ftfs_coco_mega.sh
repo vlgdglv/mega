@@ -49,10 +49,10 @@ ft_base(){
         --num-gpus 7 --config-file configs/coco/coco_ft_base.yaml \
             MODEL.WEIGHTS ${OFFICIAL_WEIGHT} \
             OUTPUT_DIR ${SAVEDIR}/ft_r101_base \
-            MEGA.RPN_ENABLE True \
+            MEGA.ROIHEADS_ENABLE True \
             MEGA.PHASE base_train \
-            MEGA.RPN_RECON_WEIGHT 1.0  \
-            MEGA.RPN_REG_WEIGHT 1.0 \
+            MEGA.ROIHEADS_RECON_WEIGHT 1.0  \
+            MEGA.ROIHEADS_REG_WEIGHT 1.0 \
             MEGA.ENABLE_GRADIENT_SCALE True \
             MEGA.RPN_GRADIENT_SCALE 0.1 \
             MEGA.ROIHEADS_GRADIENT_SCALE 0.75
@@ -74,10 +74,10 @@ fs_novel(){
             CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python3 foreign/train_start.py --num-gpus 7 --config-file ${CONFIG_PATH} \
                             MODEL.WEIGHTS checkpoints/coco/${EXPNAME}/ft_r101_base/model_reset_remove.pth \
                             OUTPUT_DIR ${OUTPUT_DIR} \
-                            MEGA.RPN_ENABLE True \
+                            MEGA.ROIHEADS_ENABLE True \
                             MEGA.PHASE novel_train \
-                            MEGA.RPN_RECON_WEIGHT 1.0 \
-                            MEGA.RPN_REG_WEIGHT 1.0 \
+                            MEGA.ROIHEADS_RECON_WEIGHT 1.0 \
+                            MEGA.ROIHEADS_REG_WEIGHT 1.0 \
                             MEGA.ENABLE_GRADIENT_SCALE True \
                             MEGA.RPN_GRADIENT_SCALE 0.1 \
                             MEGA.ROIHEADS_GRADIENT_SCALE 0.1

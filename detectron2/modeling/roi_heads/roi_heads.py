@@ -26,6 +26,7 @@ from ..contrastives import (
     SupConLoss,
     ContrastiveEncoder
 )
+from ..mega_model import ROIVAE
 
 ROI_HEADS_REGISTRY = Registry("ROI_HEADS")
 ROI_HEADS_REGISTRY.__doc__ = """
@@ -386,6 +387,7 @@ class Res5ROIHeads(ROIHeads):
         res5: nn.Module,
         box_predictor: nn.Module,
         mask_head: Optional[nn.Module] = None,
+        learner: Optional[nn.Module] = None,
         **kwargs,
     ):
         """
@@ -412,6 +414,7 @@ class Res5ROIHeads(ROIHeads):
         self.mask_on = mask_head is not None
         if self.mask_on:
             self.mask_head = mask_head
+        self.learner = learner
 
     @classmethod
     def from_config(cls, cfg, input_shape):
@@ -453,6 +456,17 @@ class Res5ROIHeads(ROIHeads):
                 cfg,
                 ShapeSpec(channels=out_channels, width=pooler_resolution, height=pooler_resolution),
             )
+
+        if cfg.MEGA.ROIHEADS_ENABLE:
+            learner = ROIVAE(input_channels=input_shape[in_features[0]].channels,
+                             output_channels=out_channels,
+                             latent_dim=cfg.MEGA.ROIHEADS_LEARNER_DIM, 
+                             phase=cfg.MEGA.PHASE,
+                             recon_weight=cfg.MEGA.ROIHEADS_RECON_WEIGHT, 
+                             reg_weight=cfg.MEGA.ROIHEADS_REG_WEIGHT)
+        else:
+            learner = None
+        ret["learner"] = learner
         return ret
 
     @classmethod
@@ -489,8 +503,12 @@ class Res5ROIHeads(ROIHeads):
         pooled_x: torch.Size([BS * NUM_BOX, 1024, 7, 7])
         resed_x: torch.Size([BS * NUM_BOX, 2048, 4, 4])
         """
-        x = self.pooler(features, boxes)
-        return self.res5(x)
+        h = self.pooler(features, boxes)
+        x = self.res5(h)
+        if self.learner is not None:
+            return x, h
+        else:
+            return x
 
     def forward(self, images, features, proposals, targets=None):
         """
@@ -510,6 +528,9 @@ class Res5ROIHeads(ROIHeads):
         box_features = self._shared_roi_transform(
             [features[f] for f in self.in_features], proposal_boxes
         )
+        if self.learner is not None:
+            box_features, before_features = box_features
+            learner_loss = self.learner.forward_and_loss(before_features, box_features) 
         predictions = self.box_predictor(box_features.mean(dim=[2, 3])) # default OPTION
 
         if self.training:
@@ -526,6 +547,8 @@ class Res5ROIHeads(ROIHeads):
                 mask_features = box_features[torch.cat(fg_selection_masks, dim=0)]
                 del box_features
                 losses.update(self.mask_head(mask_features, proposals))
+            if self.learner is not None:
+                losses.update({"learner_loss": learner_loss})
             return [], losses
         else:
             pred_instances, _ = self.box_predictor.inference(predictions, proposals)
@@ -646,14 +669,7 @@ class StandardROIHeads(ROIHeads):
         if inspect.ismethod(cls._init_keypoint_head):
             ret.update(cls._init_keypoint_head(cfg, input_shape))
         if cfg.MEGA.ROIHEAD_ENABLE:
-            learner = LearnerROI(input_channels=input_shape['p6'].channels,
-                                 pooler_resolution=cfg.MODEL.ROI_BOX_HEAD.POOLER_RESOLUTION,
-                                 output_dim=cfg.MODEL.ROI_BOX_HEAD.FC_DIM,
-                                 latent_dim=cfg.MEGA.ROIHEADS_LEARNER_DIM, 
-                                 phase=cfg.MEGA.PHASE,
-                                 entropy_loss_weights=cfg.MEGA.ENTROPY_LOSS_WEIGHTS,
-                                 rep_loss_weights=cfg.MEGA.REP_LOSS_WEIGHTS, 
-                                 guide_weight=cfg.MEGA.ROIHEADS_GUIDE_WEIGHT)
+            learner = None
         else:
             learner = None
         ret["learner"] = learner
@@ -1005,65 +1021,4 @@ class ContrastiveROIHeads(StandardROIHeads):
         else:
             pred_instances, _ = self.box_predictor.inference(predictions, proposals)
             return pred_instances
-
-
-
-class LearnerROI(nn.Module):
-    def __init__(self, input_channels, pooler_resolution, output_dim,
-                 latent_dim=512, phase=None, 
-                 entropy_loss_weights=1.0,
-                 rep_loss_weights=1.0,
-                 guide_weight=1.0, ):
-        super(LearnerROI, self).__init__()
-    
-
-        self.stander = nn.Parameter(torch.ones((1, input_channels, pooler_resolution, pooler_resolution)), requires_grad=False)
-        self.shooter = nn.Sequential(
-            nn.Linear(output_dim, latent_dim),
-            nn.ReLU(),
-        )
-        self.watcher = nn.Parameter(torch.ones(latent_dim), requires_grad=True)
         
-        self.max_lookback_steps = 12
-        self.previous_vectors = []
-        self.guide_weight = guide_weight
-        self.loss_weights = {
-            "rep_loss": rep_loss_weights,
-        }
-    
-        self._initialize_weights()
-        self.phase = phase
-        if phase == "novel_train":
-            for param in self.parameters():
-                param.requires_grad = False
-
-    def update(self, doer):
-        rep = self.forward(doer(self.stander))
-        if self.phase == "base_train":
-            # self.update_previous_knowledge(rep)
-            loss = self.compute_losses(rep)
-            return loss
-        elif self.phase == "novel_train":
-            align_loss = self.compute_alignment_loss(rep)
-            return align_loss
-        else:
-            return torch.tensor(0, dtype=self.stander.dtype, device=self.stander.device)
-
-    def forward(self, x):
-        high_rep = self.shooter(x)
-        return high_rep
-
-    def _initialize_weights(self):
-        for m in self.shooter:
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-
-    def compute_losses(self, conv_rep):
-        rep_loss = F.mse_loss(conv_rep.squeeze(), self.watcher, reduction='mean')
-        return rep_loss * self.loss_weights["rep_loss"]
-    
-    def compute_alignment_loss(self, x1):
-        align_loss = F.mse_loss(x1.squeeze(), self.watcher)
-        return align_loss * self.guide_weight

@@ -795,7 +795,7 @@ _C.MEGA = CN()
 # learner
 # Enable meta learner
 _C.MEGA.RPN_ENABLE = False
-_C.MEGA.ROIHEAD_ENABLE = False
+_C.MEGA.ROIHEADS_ENABLE = False
 # Learning phase: ["base_train", "novel_train"]
 _C.MEGA.PHASE = "None"
 # Latent space dim for rpn
@@ -808,7 +808,7 @@ _C.MEGA.REP_LOSS_WEIGHTS = 1.0
 _C.MEGA.RPN_RECON_WEIGHT = 1.0
 _C.MEGA.RPN_REG_WEIGHT = 1.0
 _C.MEGA.ROIHEADS_RECON_WEIGHT = 1.0
-_C.MEGA.ROIHEADS_GUIDE_WEIGHT = 1.0
+_C.MEGA.ROIHEADS_REG_WEIGHT = 1.0
 
 # perform Supervised Contrastive Loss within batch
 _C.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH = CN({'ENABLED': False})  # to be used to enable contrastive loss for double head
