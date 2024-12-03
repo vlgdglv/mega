@@ -237,9 +237,9 @@ class Learner(nn.Module):
         self.recon_weight = recon_weight
         self.reg_weight = reg_weight
         if phase == "base_train":
-            self.scale_x, self.scale_y = 1.0, 1.0
+            self.scale_x, self.scale_y = 0.1, 1.0
         elif phase == "novel_train":
-            self.scale_x, self.scale_y = 0.01, 0.1
+            self.scale_x, self.scale_y = 0.0, 0.1
         else:
             self.scale = 0.0
 
@@ -274,6 +274,13 @@ class ROIVAE(nn.Module):
         self.phase = phase
         self.recon_weight = recon_weight
         self.reg_weight = reg_weight
+        if phase == "base_train":
+            self.scale_x, self.scale_y = 1.0, 0.0
+        elif phase == "novel_train":
+            self.scale_x, self.scale_y = 0.0, 0.1
+            # for param in self.parameters():
+            #     param.requires_grad = False
+            
 
     def forward(self, x):
         mu, logvar = self.encoder(x)
@@ -284,24 +291,62 @@ class ROIVAE(nn.Module):
         return y_pred, mu, logvar
     
     def forward_and_loss(self, x, y):
+        x = scale_gradient(x, self.scale_x)
+        y = scale_gradient(y, self.scale_y)
         y_pred, mu, logvar = self.forward(x)
         recon_loss = F.mse_loss(y_pred, y)
         kld_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
         loss = recon_loss * self.recon_weight + kld_loss * self.reg_weight 
         return loss
     
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1):
+        super(DepthwiseSeparableConv, self).__init__()
+        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=stride,
+                                   padding=1, groups=in_channels, bias=False)
+        self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU()
+    
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        x = self.bn(x)
+        x = self.relu(x)
+        return x
 
+# class ROIEncoder(nn.Module):
+#     def __init__(self, input_channels=1024, latent_dim=256):
+#         super(ROIEncoder, self).__init__()
+#         self.conv1 = DepthwiseSeparableConv(input_channels, 256, stride=2)  # [BS, 256, 4, 4]
+#         self.conv2 = DepthwiseSeparableConv(256, 128, stride=2)             # [BS, 128, 2, 2]
+#         self.conv3 = DepthwiseSeparableConv(128, 64, stride=1)              # [BS, 64, 2, 2]
+#         self.avg_pool = nn.AdaptiveAvgPool2d(1)                             # [BS, 64, 1, 1]
+#         self.flatten = nn.Flatten()
+#         self.fc_mu = nn.Linear(64, latent_dim)
+#         self.fc_logvar = nn.Linear(64, latent_dim)
+    
+#     def forward(self, x):
+#         h = self.conv1(x)
+#         h = self.conv2(h)
+#         h = self.conv3(h)
+#         h = self.avg_pool(h)
+#         h = self.flatten(h)                     # [BS, 64]
+#         mu = self.fc_mu(h)                      # [BS, latent_dim]
+#         logvar = self.fc_logvar(h)              # [BS, latent_dim]
+#         return mu, logvar
+    
 class ROIEncoder(nn.Module):
     def __init__(self, input_channels=1024, latent_dim=512):
         super(ROIEncoder, self).__init__()
-        self.conv1 = nn.Conv2d(input_channels, 512, kernel_size=3, stride=2, padding=1)  # 输出：[BS, 512, 4, 4]
-        self.bn1 = nn.BatchNorm2d(512)
-        self.conv2 = nn.Conv2d(512, 256, kernel_size=3, stride=2, padding=1)             # 输出：[BS, 256, 2, 2]
-        self.bn2 = nn.BatchNorm2d(256)
+        self.conv1 = nn.Conv2d(input_channels, 256, kernel_size=3, stride=2, padding=1)  # [BS, 512, 4, 4]
+        self.bn1 = nn.BatchNorm2d(256)
+        self.conv2 = nn.Conv2d(256, 128, kernel_size=3, stride=2, padding=1)             # [BS, 256, 2, 2]
+        self.bn2 = nn.BatchNorm2d(128)
         self.relu = nn.ReLU()
         self.flatten = nn.Flatten()
-        self.fc_mu = nn.Linear(256 * 2 * 2, latent_dim)
-        self.fc_logvar = nn.Linear(256 * 2 * 2, latent_dim)
+        self.fc_mu = nn.Linear(128 * 2 * 2, latent_dim)
+        self.fc_logvar = nn.Linear(128 * 2 * 2, latent_dim)
     
     def forward(self, x):
         # x: [BS, 1024, 7, 7]

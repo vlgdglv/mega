@@ -530,7 +530,15 @@ class Res5ROIHeads(ROIHeads):
         )
         if self.learner is not None:
             box_features, before_features = box_features
-            learner_loss = self.learner.forward_and_loss(before_features, box_features) 
+            NUM_BOX = proposal_boxes[0].tensor.shape[0]
+            BSBBOX, C, H, W = before_features.shape
+            BS = BSBBOX // NUM_BOX
+            before_features = before_features.view(BS, NUM_BOX, C, H, W)
+            before_features = before_features.mean(dim=1)
+            BSBBOX, C, H, W = box_features.shape
+            after_features = box_features.view(BS, NUM_BOX, C, H, W)
+            after_features = after_features.mean(dim=1)
+            learner_loss = self.learner.forward_and_loss(before_features, after_features) 
         predictions = self.box_predictor(box_features.mean(dim=[2, 3])) # default OPTION
 
         if self.training:
