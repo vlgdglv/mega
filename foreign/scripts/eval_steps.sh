@@ -19,7 +19,7 @@ for file in $(find "$SEARCH_PATH" -type f -name "*.pth"); do
 
     CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python3 foreign/train_start.py \
         --eval-only \
-        --num-gpus 7 --config-file $CONFIG_PATH   \
+        --num-gpus 8 --config-file $CONFIG_PATH   \
         MODEL.WEIGHTS $file \
         OUTPUT_DIR checkpoints/coco/exp1126/r101_base/eval | tee $OUTPUT_DIR/$RESULT_FILE
 done

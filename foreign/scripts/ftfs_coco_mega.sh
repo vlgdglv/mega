@@ -26,16 +26,16 @@ ORI_WEIGHT=checkpoints/coco/base_r101/model_final.pth
 
 pretrain(){
 # Test Base:
-    CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python3 foreign/train_start.py \
-        --num-gpus 7 --config-file configs/coco/coco_pretrain.yaml     \
+    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 foreign/train_start.py \
+        --num-gpus 8 --config-file configs/coco/coco_pretrain.yaml     \
         MODEL.WEIGHTS $IMAGENET_PRETRAIN \
         OUTPUT_DIR ${SAVEDIR}/r101_base \
         MEGA.RPN_ENABLE False \
-        MEGA.ROIHEAD_ENABLE False \
-        MEGA.PHASE base_train \
+        MEGA.ROIHEADS_ENABLE False \
         MEGA.ENABLE_GRADIENT_SCALE True \
         MEGA.RPN_GRADIENT_SCALE 0.1 \
-        MEGA.ROIHEADS_GRADIENT_SCALE 0.75
+        MEGA.ROIHEADS_GRADIENT_SCALE 0.75 \
+        MODEL.ROI_HEADS.NAME VAEROIHeads 
 
     # python3 foreign/model_surgery.py --dataset coco --method remove                         \
     #     --src-path ${SAVEDIR}/ft_r101_base/model_final.pth                        \
@@ -45,7 +45,7 @@ pretrain(){
 OFFICIAL_WEIGHT=checkpoints/coco/defrcn_one/defrcn_det_r101_base/model_reset_remove.pth
 ft_base(){
 # Test Base:
-    CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python3 foreign/train_start.py \
+    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 python3 foreign/train_start.py \
         --num-gpus 7 --config-file configs/coco/coco_ft_base.yaml \
             MODEL.WEIGHTS ${OFFICIAL_WEIGHT} \
             OUTPUT_DIR ${SAVEDIR}/ft_r101_base \
@@ -55,11 +55,12 @@ ft_base(){
             MEGA.ROIHEADS_REG_WEIGHT 1.0 \
             MEGA.ENABLE_GRADIENT_SCALE True \
             MEGA.RPN_GRADIENT_SCALE 0.0 \
-            MEGA.ROIHEADS_GRADIENT_SCALE 0.75
-            
-    python3 foreign/model_surgery.py --dataset coco --method remove \
-        --src-path ${SAVEDIR}/ft_r101_base/model_final.pth \
-        --save-dir ${SAVEDIR}/ft_r101_base
+            MEGA.ROIHEADS_GRADIENT_SCALE 0.75 \
+            SOLVER.CHECKPOINT_PERIOD 1000      
+
+    # python3 foreign/model_surgery.py --dataset coco --method remove \
+    #     --src-path ${SAVEDIR}/ft_r101_base/model_final.pth \
+    #     --save-dir ${SAVEDIR}/ft_r101_base
 }
 #checkpoints/coco/${EXPNAME}/ft_r101_base/model_reset_remove.pth
 fs_novel(){
@@ -73,7 +74,7 @@ fs_novel(){
             OUTPUT_DIR=${SAVEDIR}/fsod_r101_novel/fsrw-like/${shot}shot_seed${seed}
             for r in $(seq -f "%02g" 0 2);
             do
-                CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python3 foreign/train_start.py --num-gpus 7 --config-file ${CONFIG_PATH} \
+                CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 python3 foreign/train_start.py --num-gpus 7 --config-file ${CONFIG_PATH} \
                                 MODEL.WEIGHTS ${OFFICIAL_WEIGHT} \
                                 OUTPUT_DIR ${OUTPUT_DIR} \
                                 MEGA.ROIHEADS_ENABLE False \
@@ -82,7 +83,8 @@ fs_novel(){
                                 MEGA.ROIHEADS_REG_WEIGHT 0.1\
                                 MEGA.ENABLE_GRADIENT_SCALE True \
                                 MEGA.RPN_GRADIENT_SCALE 0.0 \
-                                MEGA.ROIHEADS_GRADIENT_SCALE 0.1
+                                MEGA.ROIHEADS_GRADIENT_SCALE 0.1 \
+                                SOLVER.CHECKPOINT_PERIOD 100
             done
 
             rm $CONFIG_PATH
@@ -91,7 +93,7 @@ fs_novel(){
 }
 
 full_novel(){
-    CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python3 foreign/train_start.py \
+    CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 python3 foreign/train_start.py \
         --num-gpus 7 --config-file configs/coco/coco_ft_novel.yaml \
             MODEL.WEIGHTS ${OFFICIAL_WEIGHT} \
             OUTPUT_DIR ${SAVEDIR}/full_novel \
@@ -99,8 +101,10 @@ full_novel(){
             MEGA.PHASE base_train \
             MEGA.ENABLE_GRADIENT_SCALE True \
             MEGA.RPN_GRADIENT_SCALE 0.0 \
-            MEGA.ROIHEADS_GRADIENT_SCALE 0.5
+            MEGA.ROIHEADS_GRADIENT_SCALE 0.1 \
+            SOLVER.CHECKPOINT_PERIOD 1000
 }
+
 
 case $1 in
     "pretrain")

@@ -521,8 +521,8 @@ class Res5ROIHeads(ROIHeads):
             proposals = self.label_and_sample_proposals(proposals, targets)
         del targets
         """
-        features['res4']: torch.Size([14, 1024, 50, 75])
-        box_features: torch.Size([7168, 2048, 4, 4])
+        features['res4']: torch.Size([BS, 1024, 50, 75])
+        box_features: torch.Size([BS * BOX_NUM, 2048, 4, 4])
         """
         proposal_boxes = [x.proposal_boxes for x in proposals]
         box_features = self._shared_roi_transform(
@@ -952,6 +952,229 @@ class StandardROIHeads(ROIHeads):
             features = {f: features[f] for f in self.keypoint_in_features}
         return self.keypoint_head(features, instances)
 
+
+@ROI_HEADS_REGISTRY.register()
+class VAEROIHeads(ROIHeads):
+    """
+    The ROIHeads in a typical "C4" R-CNN model, where
+    the box and mask head share the cropping and
+    the per-region feature computation by a Res5 block.
+    See :paper:`ResNet` Appendix A.
+    """
+
+    @configurable
+    def __init__(
+        self,
+        *,
+        in_features: List[str],
+        pooler: ROIPooler,
+        featurer: nn.Module,
+        box_predictor: nn.Module,
+        mask_head: Optional[nn.Module] = None,
+        **kwargs,
+    ):
+        """
+        NOTE: this interface is experimental.
+
+        Args:
+            in_features (list[str]): list of backbone feature map names to use for
+                feature extraction
+            pooler (ROIPooler): pooler to extra region features from backbone
+            featurer (nn.Sequential): some model
+            box_predictor (nn.Module): make box predictions from the feature.
+                Should have the same interface as :class:`FastRCNNOutputLayers`.
+            mask_head (nn.Module): transform features to make mask predictions
+        """
+        super().__init__(**kwargs)
+        self.in_features = in_features
+        self.pooler = pooler
+        # if isinstance(res5, (list, tuple)):
+        #     res5 = nn.Sequential(*res5)
+        self.featurer = featurer
+        self.box_predictor = box_predictor
+        self.mask_on = mask_head is not None
+        if self.mask_on:
+            self.mask_head = mask_head
+
+    @classmethod
+    def from_config(cls, cfg, input_shape):
+        # fmt: off
+        ret = super().from_config(cfg)
+        in_features = ret["in_features"] = cfg.MODEL.ROI_HEADS.IN_FEATURES
+        pooler_resolution = cfg.MODEL.ROI_BOX_HEAD.POOLER_RESOLUTION
+        pooler_type       = cfg.MODEL.ROI_BOX_HEAD.POOLER_TYPE
+        pooler_scales     = (1.0 / input_shape[in_features[0]].stride, )
+        sampling_ratio    = cfg.MODEL.ROI_BOX_HEAD.POOLER_SAMPLING_RATIO
+        mask_on           = cfg.MODEL.MASK_ON
+        # fmt: on
+        assert not cfg.MODEL.KEYPOINT_ON
+        assert len(in_features) == 1
+
+        ret["pooler"] = ROIPooler(
+            output_size=pooler_resolution,
+            scales=pooler_scales,
+            sampling_ratio=sampling_ratio,
+            pooler_type=pooler_type,
+        )
+        roi_out_dim=cfg.MEGA.ROIHEADS_OUT_DIM
+        ret["featurer"] = VAEBlock(
+            in_channels=input_shape[in_features[0]].channels, 
+            out_dim=roi_out_dim,
+            latent_dim=cfg.MEGA.VAE_LATENT_DIM, 
+            pooler_resolution=pooler_resolution,
+        )
+
+        ret["box_predictor"] = FastRCNNOutputLayers(
+            cfg, ShapeSpec(channels=roi_out_dim, height=1, width=1)
+        )
+
+        # if mask_on:
+        #     ret["mask_head"] = build_mask_head(
+        #         cfg,
+        #         ShapeSpec(channels=out_channels, width=pooler_resolution, height=pooler_resolution),
+        #     )
+
+        
+        return ret
+
+    def forward(self, images, features, proposals, targets=None):
+        """
+        See :meth:`ROIHeads.forward`.
+        """
+        del images
+
+        if self.training:
+            assert targets
+            proposals = self.label_and_sample_proposals(proposals, targets)
+        del targets
+        """
+        features['res4']: torch.Size([BS, 1024, 50, 75])
+        box_features: torch.Size([BS * BOX_NUM, 2048, 4, 4])
+        """
+        proposal_boxes = [x.proposal_boxes for x in proposals]
+        # box_features = self._shared_roi_transform(
+        #     [features[f] for f in self.in_features], proposal_boxes
+        # )
+
+        # features_in: [BS, 1024, H, W] -> pooled_features: [BS * BOX_NUM, 1024, 7, 7]
+        pooled_features = self.pooler([features[f] for f in self.in_features], proposal_boxes) 
+        
+        # pooled_features: [BS * BOX_NUM, 1024, 7, 7] -> box_features: [BS * BOX_NUM, ?]
+        box_features, mu, logvar = self.featurer(pooled_features)
+
+        # box_features: [BS * BOX_NUM, ?]
+        predictions = self.box_predictor(box_features) # default OPTION
+
+        if self.training:
+            del features
+            losses = self.box_predictor.losses(predictions, proposals)
+            if self.mask_on:
+                proposals, fg_selection_masks = select_foreground_proposals(
+                    proposals, self.num_classes
+                )
+                # Since the ROI feature transform is shared between boxes and masks,
+                # we don't need to recompute features. The mask loss is only defined
+                # on foreground proposals, so we need to select out the foreground
+                # features.
+                mask_features = box_features[torch.cat(fg_selection_masks, dim=0)]
+                del box_features
+                losses.update(self.mask_head(mask_features, proposals))
+            # kl_loss =  -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+            # losses['roi_kl_loss'] = kl_loss
+            return [], losses
+        else:
+            pred_instances, _ = self.box_predictor.inference(predictions, proposals)
+            pred_instances = self.forward_with_given_boxes(features, pred_instances)
+            return pred_instances, {}
+
+    def forward_with_given_boxes(self, features, instances):
+        """
+        Use the given boxes in `instances` to produce other (non-box) per-ROI outputs.
+
+        Args:
+            features: same as in `forward()`
+            instances (list[Instances]): instances to predict other outputs. Expect the keys
+                "pred_boxes" and "pred_classes" to exist.
+
+        Returns:
+            instances (Instances):
+                the same `Instances` object, with extra
+                fields such as `pred_masks` or `pred_keypoints`.
+        """
+        assert not self.training
+        assert instances[0].has("pred_boxes") and instances[0].has("pred_classes")
+
+        if self.mask_on:
+            features = [features[f] for f in self.in_features]
+            x = self._shared_roi_transform(features, [x.pred_boxes for x in instances])
+            return self.mask_head(x, instances)
+        else:
+            return instances
+
+
+class VAEBlock(nn.Module):
+    def __init__(self, in_channels, out_dim, latent_dim, pooler_resolution):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_dim = out_dim
+        self.latent_dim = latent_dim
+        self.pooler_resolution = pooler_resolution
+
+        # Encoder: [BS * NUM, C_in, 7, 7]
+        self.conv_encoder = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=True), # [BS * NUM, C_in, 4, 4], floor((7 + 2*1 - 3)/2 + 1) = 4,
+            nn.BatchNorm2d(in_channels),
+            nn.Conv2d(in_channels, in_channels * 2, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True), # floor((4 + 2*1 - 3)/1 + 1) = 4
+            nn.BatchNorm2d(in_channels * 2),
+        ) # [BS * NUM, C_in * 2, 4, 4]
+
+
+        # self.channelwise_encoder = nn.Sequential(
+        #     nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0),
+        #     nn.ReLU(inplace=True), # [BS * NUM, C_in, 7, 7], floor((7 + 2*0 - 1)/1 + 1) = 7
+        #     nn.BatchNorm2d(in_channels),
+        #     nn.Conv2d(in_channels, in_channels * 2, kernel_size=3, stride=2, padding=1),
+        #     nn.ReLU(inplace=True), # floor((7 + 2*1 - 3)/2 + 1) = 4
+        #     nn.BatchNorm2d(in_channels * 2),
+        # ) # [BS * NUM, C_in * 2, 4, 4]
+
+        # reduced_res = self.pooler_resolution // 4
+        enc_out_dim = in_channels * 2
+
+        self.fc_mu = nn.Linear(enc_out_dim, latent_dim)
+        self.fc_logvar = nn.Linear(enc_out_dim, latent_dim)
+
+        # Linear decoder
+        self.decoder = nn.Linear(latent_dim, out_dim)
+
+    def forward(self, x):
+        # Encode
+        encoded = self.conv_encoder(x)
+        # channel_encoded = self.channelwise_encoder(x)
+        # encoded = conv_encoded + channel_encoded
+
+        # encoded = torch.flatten(encoded, start_dim=1)
+        encoded = encoded.mean([2, 3])
+        # Compute mu and logvar
+        mu = self.fc_mu(encoded)
+        logvar = self.fc_logvar(encoded)
+
+        # Reparameterization trick
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        z = mu + eps * std
+
+        # Decode
+        decoded = self.decoder(z)
+    
+        return decoded, mu, logvar
+
+    def loss_function(self, mu, logvar):
+        # KL divergence loss
+        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        return  kl_loss
 
 @ROI_HEADS_REGISTRY.register()
 class ContrastiveROIHeads(StandardROIHeads):
