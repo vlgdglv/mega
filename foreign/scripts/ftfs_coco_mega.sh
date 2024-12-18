@@ -16,7 +16,7 @@ IMAGENET_PRETRAIN_TORCH=weights/ImageNetPretrained/torchvision/resnet101-5d3b4d8
 
 surgery(){
     python3 foreign/model_surgery.py --dataset coco --method remove  \
-        --src-path ${SAVEDIR}/ft_r101_base/model_final.pth           \
+        --src-path ${SAVEDIR}/r101_base/model_final.pth           \
         --save-dir ${SAVEDIR}/ft_r101_base
 }
 
@@ -72,10 +72,10 @@ fs_novel(){
                     --shot ${shot} --seed ${seed} --suffix novel
             CONFIG_PATH=configs/coco/fsod_r101_novel_${shot}shot_seed${seed}.yaml
             OUTPUT_DIR=${SAVEDIR}/fsod_r101_novel/fsrw-like/${shot}shot_seed${seed}
-            for r in $(seq -f "%02g" 0 2);
+            for r in $(seq -f "%02g" 0 10);
             do
-                CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 python3 foreign/train_start.py --num-gpus 7 --config-file ${CONFIG_PATH} \
-                                MODEL.WEIGHTS ${OFFICIAL_WEIGHT} \
+                CUDA_VISIBLE_DEVICES=1,2,3,4,5,6,7 python3 foreign/train_start.py --num-gpus 7 --config-file ${CONFIG_PATH} \
+                                MODEL.WEIGHTS checkpoints/coco/${EXPNAME}/ft_r101_base/model_reset_remove.pth \
                                 OUTPUT_DIR ${OUTPUT_DIR} \
                                 MEGA.ROIHEADS_ENABLE False \
                                 MEGA.PHASE novel_train \
@@ -83,8 +83,9 @@ fs_novel(){
                                 MEGA.ROIHEADS_REG_WEIGHT 0.1\
                                 MEGA.ENABLE_GRADIENT_SCALE True \
                                 MEGA.RPN_GRADIENT_SCALE 0.0 \
-                                MEGA.ROIHEADS_GRADIENT_SCALE 0.1 \
-                                SOLVER.CHECKPOINT_PERIOD 100
+                                MEGA.ROIHEADS_GRADIENT_SCALE 0.000 \
+                                MODEL.ROI_HEADS.NAME VAEROIHeads 
+                                # SOLVER.CHECKPOINT_PERIOD 100
             done
 
             rm $CONFIG_PATH

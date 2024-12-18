@@ -16,10 +16,14 @@ while true; do
     echo "Checking GPU status..."
     if is_gpu_idle; then
         echo "All GPUs are idle. Executing command: $CMD"
-        CUDA_VISIBLE_DEVICES=7 python3 foreign/train_start.py \
+        CUDA_VISIBLE_DEVICES=0 python3 foreign/train_start.py \
             --num-gpus 1 --config-file configs/coco/fsod_r101_base_1shot_debug.yaml     \
-            MODEL.WEIGHTS checkpoints/coco/defrcn_one/defrcn_det_r101_base/model_reset_remove.pth  \
-            OUTPUT_DIR checkpoints/holding
+            MODEL.WEIGHTS checkpoints/coco/exp1214/r101_base/model_final.pth  \
+            OUTPUT_DIR checkpoints/holding \
+            MEGA.ENABLE_GRADIENT_SCALE True \
+            MEGA.RPN_GRADIENT_SCALE 0.0 \
+            MEGA.ROIHEADS_GRADIENT_SCALE 0.1 
+
     else
         echo "GPUs are busy. Retrying in $INTERVAL seconds..."
     fi

@@ -423,3 +423,17 @@ class GradientScalingLayer(nn.Module):
             out = out + self.bias.expand_as(x)
         
         return out
+
+
+class GMMPrior(nn.Module):
+    def __init__(self, latent_dim=512, num_components=64):
+        super(GMMPrior, self).__init__()
+        self.latent_dim = latent_dim
+        self.num_components = num_components
+
+        self.pi = nn.Parameter(torch.ons(num_components)/num_components)
+        self.mu = nn.Parameter(torch.randn(num_components, latent_dim))
+        self.logvar = nn.Parameter(torch.zeros(num_components, latent_dim))
+    
+    def forward(self):
+        return self.pi, self.mu, self.logvar

@@ -13,7 +13,7 @@ from detectron2.modeling.box_regression import Box2BoxTransform
 from detectron2.structures import Boxes, Instances
 from detectron2.utils.events import get_event_storage
 from ..contrastives import (
-    SupConLoss,
+    ContrastiveLoss,
     ContrastiveEncoder
 )
 
@@ -837,7 +837,7 @@ class FastRCNNContrastOutputs(FastRCNNOutputLayers):
         Args:
             box_cls_feat_con (Tensor): the projected features
                 to calculate supervised contrastive loss upon
-            criterion (SupConLoss <- nn.Module): SupConLoss is implemented in fsdet/modeling/contrastive_loss.py
+            criterion (ContrastiveLoss <- nn.Module): ContrastiveLoss is implemented in fsdet/modeling/contrastive_loss.py
         """
         super().__init__(**kwargs)
 
@@ -859,7 +859,7 @@ class FastRCNNContrastOutputs(FastRCNNOutputLayers):
     @classmethod
     def from_config(cls, cfg, input_shape):
         ret = super().from_config(cfg, input_shape)
-        constrastive_criterion = SupConLoss(
+        constrastive_criterion = ContrastiveLoss(
             cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.TEMPERATURE,
             cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.IOU_THRESHOLD,
             cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.REWEIGHT_FUNC

@@ -4,7 +4,7 @@ import torch.nn.functional as F
 import fvcore.nn.weight_init as weight_init
 
 
-class SupConLoss(nn.Module):
+class ContrastiveLoss(nn.Module):
     """Supervised Contrastive LOSS as defined in https://arxiv.org/pdf/2004.11362.pdf."""
 
     def __init__(self, temperature=0.2, iou_threshold=0.5, reweight_func='none'):
@@ -32,11 +32,16 @@ class SupConLoss(nn.Module):
         # mask of shape [None, None], mask_{i, j}=1 if sample i and sample j have the same label
         label_mask = torch.eq(labels, labels.T).float().cuda()
 
-        similarity = torch.div(
-            torch.matmul(features, features.T), self.temperature)
+        feature_l2 = torch.norm(features, dim=1)
+        features = features / feature_l2.unsqueeze(1)
+        cos_sim = torch.matmul(features, features.T) 
+        similarity = cos_sim / self.temperature
+
+        # similarity = torch.div(
+        #     torch.matmul(features, features.T), self.temperature)
         # for numerical stability
-        sim_row_max, _ = torch.max(similarity, dim=1, keepdim=True)
-        similarity = similarity - sim_row_max.detach()
+        # sim_row_max, _ = torch.max(similarity, dim=1, keepdim=True)
+        # similarity = similarity - sim_row_max.detach()
 
         # mask out self-contrastive
         logits_mask = torch.ones_like(similarity)
@@ -44,17 +49,24 @@ class SupConLoss(nn.Module):
 
         exp_sim = torch.exp(similarity) * logits_mask
         log_prob = similarity - torch.log(exp_sim.sum(dim=1, keepdim=True))
-
         per_label_log_prob = (log_prob * logits_mask * label_mask).sum(1) / label_mask.sum(1)
-
         keep = ious >= self.iou_threshold
         per_label_log_prob = per_label_log_prob[keep]
         loss = -per_label_log_prob
-
         coef = self._get_reweight_func(self.reweight_func)(ious)
         coef = coef[keep]
-
         loss = loss * coef
+
+        # exp_sim = torch.exp(similarity)
+        # mask = logits_mask * label_mask
+        # keep = (mask.sum(1) != 0 ) & (ious >= self.iou_threshold)
+        # print(exp_sim)
+        # log_prob = torch.log(
+        #     (exp_sim[keep] * mask[keep]).sum(1) / (exp_sim[keep] * logits_mask[keep]).sum(1)
+        # )
+
+        loss = -log_prob
+
         return loss.mean()
 
     @staticmethod

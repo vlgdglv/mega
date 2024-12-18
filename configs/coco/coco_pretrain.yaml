@@ -13,6 +13,7 @@ DATASETS:
   TRAIN: ('coco14_trainval_base',)
   TEST: ('coco14_test_base',)
 SOLVER:
+  BASE_LR: 0.02
   IMS_PER_BATCH: 16
   STEPS: (80000, 100000)
   MAX_ITER: 110000

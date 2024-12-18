@@ -8,7 +8,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from detectron2.config import configurable
-from detectron2.layers import ShapeSpec, nonzero_tuple
+from detectron2.layers import ShapeSpec, nonzero_tuple, cat
 from detectron2.structures import Boxes, ImageList, Instances, pairwise_iou
 from detectron2.utils.events import get_event_storage
 from detectron2.utils.registry import Registry
@@ -23,7 +23,7 @@ from .fast_rcnn import FastRCNNOutputLayers, FastRCNNContrastOutputs
 from .keypoint_head import build_keypoint_head
 from .mask_head import build_mask_head
 from ..contrastives import (
-    SupConLoss,
+    ContrastiveLoss,
     ContrastiveEncoder
 )
 from ..mega_model import ROIVAE
@@ -971,6 +971,7 @@ class VAEROIHeads(ROIHeads):
         featurer: nn.Module,
         box_predictor: nn.Module,
         mask_head: Optional[nn.Module] = None,
+        contrastive_head: Optional[nn.Module] = None,
         **kwargs,
     ):
         """
@@ -993,6 +994,7 @@ class VAEROIHeads(ROIHeads):
         self.featurer = featurer
         self.box_predictor = box_predictor
         self.mask_on = mask_head is not None
+        self.contrastive_head = contrastive_head
         if self.mask_on:
             self.mask_head = mask_head
 
@@ -1028,6 +1030,11 @@ class VAEROIHeads(ROIHeads):
             cfg, ShapeSpec(channels=roi_out_dim, height=1, width=1)
         )
 
+        ret["contrastive_head"] = ContrastiveLoss(
+            cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.TEMPERATURE,
+            cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.IOU_THRESHOLD,
+            cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.REWEIGHT_FUNC
+        )
         # if mask_on:
         #     ret["mask_head"] = build_mask_head(
         #         cfg,
@@ -1060,7 +1067,11 @@ class VAEROIHeads(ROIHeads):
         pooled_features = self.pooler([features[f] for f in self.in_features], proposal_boxes) 
         
         # pooled_features: [BS * BOX_NUM, 1024, 7, 7] -> box_features: [BS * BOX_NUM, ?]
-        box_features, mu, logvar = self.featurer(pooled_features)
+        returned_things = self.featurer(pooled_features, self.training)
+        if self.training:
+            box_features, mu, logvar, z = returned_things
+        else:
+            box_features = returned_things
 
         # box_features: [BS * BOX_NUM, ?]
         predictions = self.box_predictor(box_features) # default OPTION
@@ -1068,6 +1079,19 @@ class VAEROIHeads(ROIHeads):
         if self.training:
             del features
             losses = self.box_predictor.losses(predictions, proposals)
+            kl_loss = self.featurer.loss_function(mu, logvar)
+            losses['roi_kl_loss'] = kl_loss
+
+            gt_classes = (
+                cat([p.gt_classes for p in proposals], dim=0) if len(proposals) else torch.empty(0)
+            )
+            ious = (
+                cat([p.iou for p in proposals], dim=0) if len(proposals) else torch.empty(0.0)
+            )
+            if self.contrastive_head is not None:
+                con_loss = self.contrastive_head(z, gt_classes, ious)
+                losses['roi_contrastive_loss'] = con_loss
+
             if self.mask_on:
                 proposals, fg_selection_masks = select_foreground_proposals(
                     proposals, self.num_classes
@@ -1086,6 +1110,7 @@ class VAEROIHeads(ROIHeads):
             pred_instances, _ = self.box_predictor.inference(predictions, proposals)
             pred_instances = self.forward_with_given_boxes(features, pred_instances)
             return pred_instances, {}
+    
 
     def forward_with_given_boxes(self, features, instances):
         """
@@ -1113,23 +1138,30 @@ class VAEROIHeads(ROIHeads):
 
 
 class VAEBlock(nn.Module):
-    def __init__(self, in_channels, out_dim, latent_dim, pooler_resolution):
+    def __init__(self, in_channels, out_dim, latent_dim, pooler_resolution, hidden_dim=2048, prior_type='normal'):
         super().__init__()
         self.in_channels = in_channels
         self.out_dim = out_dim
         self.latent_dim = latent_dim
         self.pooler_resolution = pooler_resolution
-
+        
         # Encoder: [BS * NUM, C_in, 7, 7]
-        self.conv_encoder = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=True), # [BS * NUM, C_in, 4, 4], floor((7 + 2*1 - 3)/2 + 1) = 4,
-            nn.BatchNorm2d(in_channels),
-            nn.Conv2d(in_channels, in_channels * 2, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True), # floor((4 + 2*1 - 3)/1 + 1) = 4
-            nn.BatchNorm2d(in_channels * 2),
-        ) # [BS * NUM, C_in * 2, 4, 4]
-
+        # self.encoder = nn.Sequential(
+        #     nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=1),
+        #     nn.ReLU(inplace=True), # [BS * NUM, C_in, 4, 4], floor((7 + 2*1 - 3)/2 + 1) = 4,
+        #     nn.BatchNorm2d(in_channels),
+        #     nn.Conv2d(in_channels, in_channels * 2, kernel_size=3, stride=1, padding=1),
+        #     nn.ReLU(inplace=True), # floor((4 + 2*1 - 3)/1 + 1) = 4
+        #     nn.BatchNorm2d(in_channels * 2),
+        # ) 
+        # [BS * NUM, C_in * 2, 4, 4]
+        self.encoder = nn.Sequential(
+            nn.Flatten(start_dim=1),
+            nn.Linear(in_channels * self.pooler_resolution * self.pooler_resolution, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU()
+        )
 
         # self.channelwise_encoder = nn.Sequential(
         #     nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0),
@@ -1143,20 +1175,20 @@ class VAEBlock(nn.Module):
         # reduced_res = self.pooler_resolution // 4
         enc_out_dim = in_channels * 2
 
-        self.fc_mu = nn.Linear(enc_out_dim, latent_dim)
-        self.fc_logvar = nn.Linear(enc_out_dim, latent_dim)
+        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
 
         # Linear decoder
         self.decoder = nn.Linear(latent_dim, out_dim)
 
-    def forward(self, x):
+    def forward(self, x, is_train=True):
         # Encode
-        encoded = self.conv_encoder(x)
+        encoded = self.encoder(x)
         # channel_encoded = self.channelwise_encoder(x)
         # encoded = conv_encoded + channel_encoded
 
         # encoded = torch.flatten(encoded, start_dim=1)
-        encoded = encoded.mean([2, 3])
+        # encoded = encoded.mean([2, 3])
         # Compute mu and logvar
         mu = self.fc_mu(encoded)
         logvar = self.fc_logvar(encoded)
@@ -1168,12 +1200,15 @@ class VAEBlock(nn.Module):
 
         # Decode
         decoded = self.decoder(z)
-    
-        return decoded, mu, logvar
+
+        if is_train:
+            return decoded, mu, logvar, z
+        else:
+            return decoded
 
     def loss_function(self, mu, logvar):
         # KL divergence loss
-        kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
         return  kl_loss
 
 @ROI_HEADS_REGISTRY.register()
