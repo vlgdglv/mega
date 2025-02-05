@@ -18,11 +18,12 @@ while true; do
         echo "All GPUs are idle. Executing command: $CMD"
         CUDA_VISIBLE_DEVICES=0 python3 foreign/train_start.py \
             --num-gpus 1 --config-file configs/coco/fsod_r101_base_1shot_debug.yaml     \
-            MODEL.WEIGHTS checkpoints/coco/exp1214/r101_base/model_final.pth  \
+            MODEL.WEIGHTS weights/ImageNetPretrained/MSRA/R-101.pkl  \
             OUTPUT_DIR checkpoints/holding \
             MEGA.ENABLE_GRADIENT_SCALE True \
             MEGA.RPN_GRADIENT_SCALE 0.0 \
-            MEGA.ROIHEADS_GRADIENT_SCALE 0.1 
+            MEGA.ROIHEADS_GRADIENT_SCALE 0.1 \
+            SOLVER.MAX_ITER 500000
 
     else
         echo "GPUs are busy. Retrying in $INTERVAL seconds..."
