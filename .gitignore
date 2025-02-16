@@ -12,7 +12,8 @@ datasets/cifar-10-batches-py
 checkpoints/
 startups/
 startups.zip
-
+coco/
+*.zip
 *.png
 *.json
 !vscode_launch.json

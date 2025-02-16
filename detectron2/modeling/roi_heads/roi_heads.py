@@ -8,7 +8,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from detectron2.config import configurable
-from detectron2.layers import ShapeSpec, nonzero_tuple, cat
+from detectron2.layers import ShapeSpec, nonzero_tuple, cat, cross_entropy
 from detectron2.structures import Boxes, ImageList, Instances, pairwise_iou
 from detectron2.utils.events import get_event_storage
 from detectron2.utils.registry import Registry
@@ -676,10 +676,10 @@ class StandardROIHeads(ROIHeads):
             ret.update(cls._init_mask_head(cfg, input_shape))
         if inspect.ismethod(cls._init_keypoint_head):
             ret.update(cls._init_keypoint_head(cfg, input_shape))
-        if cfg.MEGA.ROIHEAD_ENABLE:
-            learner = None
-        else:
-            learner = None
+        # if cfg.MEGA.ROIHEADS_ENABLE:
+        #     learner = None
+        # else:
+        learner = None
         ret["learner"] = learner
         return ret
 
@@ -952,6 +952,21 @@ class StandardROIHeads(ROIHeads):
             features = {f: features[f] for f in self.keypoint_in_features}
         return self.keypoint_head(features, instances)
 
+class Localizer(nn.Module):
+    def __init__(self, in_channels: int, pooler_resolution: int, fc_dim: int, num_classes: int, box_dim: int =4):
+        super().__init__()
+        self.fc_dim = fc_dim
+        self.num_classes = num_classes
+        self.localizer = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(in_channels * pooler_resolution * pooler_resolution, self.fc_dim),
+            nn.ReLU(),
+            nn.Linear(self.fc_dim, box_dim * num_classes),
+        )
+
+    def forward(self, features):
+        return self.localizer(features)
+
 
 @ROI_HEADS_REGISTRY.register()
 class VAEROIHeads(ROIHeads):
@@ -968,8 +983,10 @@ class VAEROIHeads(ROIHeads):
         *,
         in_features: List[str],
         pooler: ROIPooler,
-        featurer: nn.Module,
-        box_predictor: nn.Module,
+        localizer: nn.Module,
+        vae_cls: nn.Module,
+        input_shape: ShapeSpec,
+        box_predictor: Optional[nn.Module] = None,
         mask_head: Optional[nn.Module] = None,
         contrastive_head: Optional[nn.Module] = None,
         **kwargs,
@@ -991,10 +1008,16 @@ class VAEROIHeads(ROIHeads):
         self.pooler = pooler
         # if isinstance(res5, (list, tuple)):
         #     res5 = nn.Sequential(*res5)
-        self.featurer = featurer
+        self.vae_cls = vae_cls
+        self.localizer = localizer
+
         self.box_predictor = box_predictor
+        for param in self.box_predictor.parameters():
+            param.requires_grad = False
         self.mask_on = mask_head is not None
         self.contrastive_head = contrastive_head
+         
+
         if self.mask_on:
             self.mask_head = mask_head
 
@@ -1008,6 +1031,7 @@ class VAEROIHeads(ROIHeads):
         pooler_scales     = (1.0 / input_shape[in_features[0]].stride, )
         sampling_ratio    = cfg.MODEL.ROI_BOX_HEAD.POOLER_SAMPLING_RATIO
         mask_on           = cfg.MODEL.MASK_ON
+
         # fmt: on
         assert not cfg.MODEL.KEYPOINT_ON
         assert len(in_features) == 1
@@ -1019,29 +1043,29 @@ class VAEROIHeads(ROIHeads):
             pooler_type=pooler_type,
         )
         roi_out_dim=cfg.MEGA.ROIHEADS_OUT_DIM
-        ret["featurer"] = VAEBlock(
+        ret["vae_cls"] = VAEBlock(
             in_channels=input_shape[in_features[0]].channels, 
             out_dim=roi_out_dim,
             latent_dim=cfg.MEGA.VAE_LATENT_DIM, 
             pooler_resolution=pooler_resolution,
+            num_classes=cfg.MODEL.ROI_HEADS.NUM_CLASSES
         )
 
         ret["box_predictor"] = FastRCNNOutputLayers(
             cfg, ShapeSpec(channels=roi_out_dim, height=1, width=1)
         )
 
-        ret["contrastive_head"] = ContrastiveLoss(
-            cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.TEMPERATURE,
-            cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.IOU_THRESHOLD,
-            cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.REWEIGHT_FUNC
-        )
-        # if mask_on:
-        #     ret["mask_head"] = build_mask_head(
-        #         cfg,
-        #         ShapeSpec(channels=out_channels, width=pooler_resolution, height=pooler_resolution),
-        #     )
+        # ret["contrastive_head"] = ContrastiveLoss(
+        #     cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.TEMPERATURE,
+        #     cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.IOU_THRESHOLD,
+        #     cfg.MODEL.ROI_BOX_HEAD.CONTRASTIVE_BRANCH.REWEIGHT_FUNC
+        # )
+        ret["localizer"] = Localizer(in_channels=input_shape[in_features[0]].channels, 
+                                     pooler_resolution=pooler_resolution, 
+                                     fc_dim=cfg.MODEL.ROI_BOX_HEAD.FC_DIM, 
+                                     num_classes=cfg.MODEL.ROI_HEADS.NUM_CLASSES,)
+        ret["input_shape"] = input_shape
 
-        
         return ret
 
     def forward(self, images, features, proposals, targets=None):
@@ -1066,21 +1090,26 @@ class VAEROIHeads(ROIHeads):
         # features_in: [BS, 1024, H, W] -> pooled_features: [BS * BOX_NUM, 1024, 7, 7]
         pooled_features = self.pooler([features[f] for f in self.in_features], proposal_boxes) 
         
+        returned_things = self.vae_cls(pooled_features)
+        proposal_deltas = self.localizer(pooled_features)
+        
         # pooled_features: [BS * BOX_NUM, 1024, 7, 7] -> box_features: [BS * BOX_NUM, ?]
-        returned_things = self.featurer(pooled_features, self.training)
+        # returned_things = self.featurer(pooled_features, self.training)
         if self.training:
-            box_features, mu, logvar, z = returned_things
+            scores, decoded, mu, logvar, z = returned_things
         else:
-            box_features = returned_things
+            scores = returned_things
 
         # box_features: [BS * BOX_NUM, ?]
-        predictions = self.box_predictor(box_features) # default OPTION
+        # predictions = self.box_predictor(box_features) # default OPTION
 
         if self.training:
             del features
-            losses = self.box_predictor.losses(predictions, proposals)
-            kl_loss = self.featurer.loss_function(mu, logvar)
+            losses = self.box_predictor.losses((scores, proposal_deltas), proposals)
+            kl_loss = self.vae_cls.kl_loss(mu, logvar)
             losses['roi_kl_loss'] = kl_loss
+            recon_loss = self.vae_cls.recon_loss(decoded, pooled_features)
+            losses['roi_recon_loss'] = recon_loss
 
             gt_classes = (
                 cat([p.gt_classes for p in proposals], dim=0) if len(proposals) else torch.empty(0)
@@ -1088,9 +1117,9 @@ class VAEROIHeads(ROIHeads):
             ious = (
                 cat([p.iou for p in proposals], dim=0) if len(proposals) else torch.empty(0.0)
             )
-            if self.contrastive_head is not None:
-                con_loss = self.contrastive_head(z, gt_classes, ious)
-                losses['roi_contrastive_loss'] = con_loss
+            # if self.contrastive_head is not None:
+            #     con_loss = self.contrastive_head(z, gt_classes, ious)
+            #     losses['roi_contrastive_loss'] = con_loss
 
             if self.mask_on:
                 proposals, fg_selection_masks = select_foreground_proposals(
@@ -1107,11 +1136,60 @@ class VAEROIHeads(ROIHeads):
             # losses['roi_kl_loss'] = kl_loss
             return [], losses
         else:
-            pred_instances, _ = self.box_predictor.inference(predictions, proposals)
+            pred_instances, _ = self.box_predictor.inference((scores, proposal_deltas), proposals)
             pred_instances = self.forward_with_given_boxes(features, pred_instances)
             return pred_instances, {}
     
+    def losses(self, predictions, proposals):
+        """
+        Args:
+            predictions: return values of :meth:`forward()`.
+            proposals (list[Instances]): proposals that match the features that were used
+                to compute predictions. The fields ``proposal_boxes``, ``gt_boxes``,
+                ``gt_classes`` are expected.
 
+        Returns:
+            Dict[str, Tensor]: dict of losses
+        """
+        scores, proposal_deltas = predictions
+
+        # parse classification outputs
+        gt_classes = (
+            cat([p.gt_classes for p in proposals], dim=0) if len(proposals) else torch.empty(0)
+        )
+        _log_classification_stats(scores, gt_classes)
+
+        # parse box regression outputs
+        if len(proposals):
+            proposal_boxes = cat([p.proposal_boxes.tensor for p in proposals], dim=0)  # Nx4
+            assert not proposal_boxes.requires_grad, "Proposals should not require gradients!"
+            # If "gt_boxes" does not exist, the proposals must be all negative and
+            # should not be included in regression loss computation.
+            # Here we just use proposal_boxes as an arbitrary placeholder because its
+            # value won't be used in self.box_reg_loss().
+            gt_boxes = cat(
+                [(p.gt_boxes if p.has("gt_boxes") else p.proposal_boxes).tensor for p in proposals],
+                dim=0,
+            )
+        else:
+            proposal_boxes = gt_boxes = torch.empty((0, 4), device=proposal_deltas.device)
+        
+        # loss weights
+        if self.cls_loss_weight is not None and self.cls_loss_weight.device != scores.device:
+            self.cls_loss_weight = self.cls_loss_weight.to(scores.device)
+        if self.focal_scaled_loss is not None:
+            loss_cls = self.focal_loss(scores, gt_classes, gamma=self.focal_scaled_loss)
+        else:    
+            loss_cls = cross_entropy(scores, gt_classes, reduction="mean") if self.cls_loss_weight is None else \
+                       cross_entropy(scores, gt_classes, reduction="mean", weight=self.cls_loss_weight)
+        losses = {
+            "loss_cls": loss_cls,
+            "loss_box_reg": self.box_reg_loss(
+                proposal_boxes, gt_boxes, proposal_deltas, gt_classes
+            ),
+        }
+        return {k: v * self.loss_weight.get(k, 1.0) for k, v in losses.items()}
+    
     def forward_with_given_boxes(self, features, instances):
         """
         Use the given boxes in `instances` to produce other (non-box) per-ROI outputs.
@@ -1137,31 +1215,76 @@ class VAEROIHeads(ROIHeads):
             return instances
 
 
+def _log_classification_stats(pred_logits, gt_classes, prefix=""):
+    """
+    Log the classification metrics to EventStorage.
+
+    Args:
+        pred_logits: Rx(K+1) logits. The last column is for background class.
+        gt_classes: R labels
+    """
+    num_instances = gt_classes.numel()
+    if num_instances == 0:
+        return
+    pred_classes = pred_logits.argmax(dim=1)
+    bg_class_ind = pred_logits.shape[1] - 1
+
+    fg_inds = (gt_classes >= 0) & (gt_classes < bg_class_ind)
+    num_fg = fg_inds.nonzero().numel()
+    fg_gt_classes = gt_classes[fg_inds]
+    fg_pred_classes = pred_classes[fg_inds]
+
+    num_false_negative = (fg_pred_classes == bg_class_ind).nonzero().numel()
+    num_accurate = (pred_classes == gt_classes).nonzero().numel()
+    fg_num_accurate = (fg_pred_classes == fg_gt_classes).nonzero().numel()
+
+    try:
+        storage = get_event_storage()
+        storage.put_scalar(f"cls_acc", num_accurate / num_instances)
+        if num_fg > 0:
+            storage.put_scalar(f"fg_cls_acc", fg_num_accurate / num_fg)
+            storage.put_scalar(f"false_neg_ratio", num_false_negative / num_fg)
+            #print("cls_accuracy {:.2f}; fg_cls_accuracy {:.2f}; false_negative {:.2f}".format(num_accurate / num_instances, fg_num_accurate / num_fg, num_false_negative / num_fg))
+    except:
+        pass
+
 class VAEBlock(nn.Module):
-    def __init__(self, in_channels, out_dim, latent_dim, pooler_resolution, hidden_dim=2048, prior_type='normal'):
+    def __init__(self, in_channels, out_dim,  latent_dim, pooler_resolution, num_classes, conv_dim=256, hidden_dim=512, prior_type='normal'):
         super().__init__()
         self.in_channels = in_channels
         self.out_dim = out_dim
         self.latent_dim = latent_dim
         self.pooler_resolution = pooler_resolution
         
+        org_dim = in_channels * pooler_resolution * pooler_resolution
         # Encoder: [BS * NUM, C_in, 7, 7]
-        # self.encoder = nn.Sequential(
-        #     nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=1),
-        #     nn.ReLU(inplace=True), # [BS * NUM, C_in, 4, 4], floor((7 + 2*1 - 3)/2 + 1) = 4,
-        #     nn.BatchNorm2d(in_channels),
-        #     nn.Conv2d(in_channels, in_channels * 2, kernel_size=3, stride=1, padding=1),
-        #     nn.ReLU(inplace=True), # floor((4 + 2*1 - 3)/1 + 1) = 4
-        #     nn.BatchNorm2d(in_channels * 2),
-        # ) 
-        # [BS * NUM, C_in * 2, 4, 4]
+
         self.encoder = nn.Sequential(
-            nn.Flatten(start_dim=1),
-            nn.Linear(in_channels * self.pooler_resolution * self.pooler_resolution, hidden_dim),
+            nn.Conv2d(in_channels, in_channels, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=True), # [BS * NUM, C_in, 4, 4], floor((7 + 2*1 - 3)/2 + 1) = 4,
+            nn.BatchNorm2d(in_channels),
+            # nn.Flatten(start_dim=1)
+            nn.Conv2d(in_channels, conv_dim, kernel_size=1, stride=1, padding=0),
+            nn.ReLU(inplace=True), # floor((4 + 2*1 - 3)/1 + 1) = 4
+            nn.BatchNorm2d(conv_dim),
+        ) 
+        # encoder_out_dim = in_channels * conv_dim * 4 * 4
+        self.fc_mu = nn.Linear(conv_dim, latent_dim)
+        self.fc_logvar = nn.Linear(conv_dim, latent_dim)
+        
+        # self.decoder = nn.Linear(latent_dim, out_dim)
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, org_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU()
         )
+        # [BS * NUM, C_in * 2, 4, 4]
+        # self.encoder = nn.Sequential(
+        #     nn.Flatten(start_dim=1),
+        #     nn.Linear(in_channels * self.pooler_resolution * self.pooler_resolution, hidden_dim),
+        #     nn.ReLU(),
+        #     nn.Linear(hidden_dim, hidden_dim),
+        #     nn.ReLU()
+        # )
 
         # self.channelwise_encoder = nn.Sequential(
         #     nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=1, padding=0),
@@ -1173,13 +1296,12 @@ class VAEBlock(nn.Module):
         # ) # [BS * NUM, C_in * 2, 4, 4]
 
         # reduced_res = self.pooler_resolution // 4
-        enc_out_dim = in_channels * 2
-
-        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
-        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
 
         # Linear decoder
-        self.decoder = nn.Linear(latent_dim, out_dim)
+
+        self.cls_score = nn.Linear(org_dim, num_classes + 1) # one background class (hence + 1)
+        nn.init.normal_(self.cls_score.weight, std=0.01)
+        nn.init.constant_(self.cls_score.bias, 0)
 
     def forward(self, x, is_train=True):
         # Encode
@@ -1188,7 +1310,7 @@ class VAEBlock(nn.Module):
         # encoded = conv_encoded + channel_encoded
 
         # encoded = torch.flatten(encoded, start_dim=1)
-        # encoded = encoded.mean([2, 3])
+        encoded = encoded.mean([2, 3])
         # Compute mu and logvar
         mu = self.fc_mu(encoded)
         logvar = self.fc_logvar(encoded)
@@ -1201,15 +1323,22 @@ class VAEBlock(nn.Module):
         # Decode
         decoded = self.decoder(z)
 
+        scores = self.cls_score(decoded)
         if is_train:
-            return decoded, mu, logvar, z
+            return scores, decoded, mu, logvar, z
         else:
-            return decoded
+            return scores
 
-    def loss_function(self, mu, logvar):
+    def kl_loss(self, mu, logvar):
         # KL divergence loss
         kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
         return  kl_loss
+    
+    def recon_loss(self, decoded, x):
+        # Reconstruction loss
+        BS, C, H, W = x.shape
+        recon_loss = F.mse_loss(decoded, x.view(BS, -1))
+        return recon_loss
 
 @ROI_HEADS_REGISTRY.register()
 class ContrastiveROIHeads(StandardROIHeads):
